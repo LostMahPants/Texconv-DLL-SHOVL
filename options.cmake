@@ -11,7 +11,7 @@ option(TEXCONV_BUILD_AS_EXE "Build texconv as .exe" OFF)
 option(TEXCONV_ICON_FOR_EXE "Use directx.ico for .exe" OFF)
 
 # other options
-option(TEXCONV_USE_WIC "Use WIC for non-DDS formats" ON)
+option(TEXCONV_USE_WIC "Use WIC for non-DDS formats" OFF)
 option(TEXCONV_NO_GPU_CODEC "Disable GPU codec for BC6 and BC7" OFF)
 option(TEXCONV_USE_TEXASSEMBLE "Use texassemble as a dll function" OFF)
 

@@ -1,10 +1,13 @@
 # project
 .vs
 .vscode
+.idea
 *.json
 unix_external/sal/sal.h
 
 # build
+cmake-build-debug-visual-studio
+cmake-build-release-visual-studio
 build
 build_exe
 *.so

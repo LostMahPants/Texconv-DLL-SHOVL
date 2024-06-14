@@ -1519,10 +1519,10 @@ namespace
 #endif
 
 #ifdef _WIN32
-extern "C" __declspec(dllexport) int __cdecl texconv(int argc, wchar_t* argv[], bool verbose = true, bool init_com = false, bool allow_slow_codec = true, wchar_t* err_buf = nullptr, int err_buf_size = 0)
+extern "C" __declspec(dllexport) int __cdecl texconv(int argc, wchar_t* argv[], wchar_t* fname, void* pSource = nullptr, int byte_size = 0,bool verbose = true, bool init_com = false, bool allow_slow_codec = true, wchar_t* err_buf = nullptr, int err_buf_size = 0)
 {
 #else
-extern "C" __attribute__((visibility("default"))) int texconv(int argc, wchar_t* argv[], bool verbose = true, bool init_com = false, bool allow_slow_codec = true, wchar_t* err_buf = nullptr, int err_buf_size = 0)
+extern "C" __attribute__((visibility("default"))) int texconv(int argc, wchar_t* argv[], wchar_t* fname, void* pSource = nullptr, int byte_size = 0, bool verbose = true, bool init_com = false, bool allow_slow_codec = true, wchar_t* err_buf = nullptr, int err_buf_size = 0)
 {
     init_com = false;
 #endif
@@ -2201,11 +2201,11 @@ extern "C" __attribute__((visibility("default"))) int texconv(int argc, wchar_t*
         }
     }
 
-    if (conversion.empty())
-    {
-        PrintUsage();
-        return 0;
-    }
+    //if (conversion.empty())
+    //{
+    //    PrintUsage();
+    //    return 0;
+    //}
 
 #if BUILD_AS_EXE
     if (~dwOptions & (uint64_t(1) << OPT_NOLOGO))
@@ -2249,612 +2249,186 @@ extern "C" __attribute__((visibility("default"))) int texconv(int argc, wchar_t*
 
     int retVal = 0;
 
-    for (auto pConv = conversion.begin(); pConv != conversion.end(); ++pConv)
+
+
+    TexMetadata info;
+    std::unique_ptr<ScratchImage> image(new (std::nothrow) ScratchImage);
+
+    if (!image)
     {
-        if (pConv != conversion.begin())
-            PrintVerbose(L"\n");
+        RaiseError(L"\nERROR:Memory allocation failed\n");
+        return 1;
+    }
 
-        // --- Load source image -------------------------------------------------------
-        PrintVerbose(L"reading %ls", pConv->szSrc.c_str());
-        fflush(stdout);
+    //std::filesystem::path curpath(pConv->szSrc);
+    //auto const ext = curpath.extension();
 
-        TexMetadata info;
-        std::unique_ptr<ScratchImage> image(new (std::nothrow) ScratchImage);
+#ifndef USE_XBOX_EXTS
+    constexpr
+#endif
+    bool isXbox = false;
+    if (pSource && byte_size)
+    {
+    #ifdef USE_XBOX_EXTS
+        hr = Xbox::GetMetadataFromDDSFile(curpath.wstring().c_str(), info, isXbox);
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            retVal = 1;
+            continue;
+        }
 
-        if (!image)
+        if (isXbox)
+        {
+            Xbox::XboxImage xbox;
+
+            hr = Xbox::LoadFromDDSFile(curpath.wstring().c_str(), &info, xbox);
+            if (SUCCEEDED(hr))
+            {
+                hr = Xbox::Detile(xbox, *image);
+            }
+        }
+        else
+    #endif // USE_XBOX_EXTS
+        {
+            DDS_FLAGS ddsFlags = DDS_FLAGS_ALLOW_LARGE_FILES;
+            if (dwOptions & (uint64_t(1) << OPT_DDS_DWORD_ALIGN))
+                ddsFlags |= DDS_FLAGS_LEGACY_DWORD;
+            if (dwOptions & (uint64_t(1) << OPT_EXPAND_LUMINANCE))
+                ddsFlags |= DDS_FLAGS_EXPAND_LUMINANCE;
+            if (dwOptions & (uint64_t(1) << OPT_DDS_BAD_DXTN_TAILS))
+                ddsFlags |= DDS_FLAGS_BAD_DXTN_TAILS;
+            if (dwOptions & (uint64_t(1) << OPT_DDS_PERMISSIVE))
+                ddsFlags |= DDS_FLAGS_PERMISSIVE;
+
+            //hr = LoadFromDDSFile(curpath.wstring().c_str(), ddsFlags, &info, *image);
+            hr = LoadFromDDSMemory( pSource, byte_size, ddsFlags, &info, *image);
+        }
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+        if (IsTypeless(info.format))
+        {
+            if (dwOptions & (uint64_t(1) << OPT_TYPELESS_UNORM))
+            {
+                info.format = MakeTypelessUNORM(info.format);
+            }
+            else if (dwOptions & (uint64_t(1) << OPT_TYPELESS_FLOAT))
+            {
+                info.format = MakeTypelessFLOAT(info.format);
+            }
+
+            if (IsTypeless(info.format))
+            {
+                RaiseError(L" FAILED due to Typeless format %d\n", info.format);
+                return 1;
+
+            }
+
+            image->OverrideFormat(info.format);
+        }
+    }
+#ifdef USE_OPENEXR
+    else if (_wcsicmp(ext.wstring().c_str(), L".exr") == 0)
+    {
+        hr = LoadFromEXRFile(curpath.wstring().c_str(), &info, *image);
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+    }
+#endif
+#ifdef USE_LIBJPEG
+    else if (_wcsicmp(ext.wstring().c_str(), L".jpg") == 0 || _wcsicmp(ext.wstring().c_str(), L".jpeg") == 0)
+    {
+        hr = LoadFromJPEGFile(curpath.wstring().c_str(), &info, *image);
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+    }
+#endif
+#ifdef USE_LIBPNG
+    else if (_wcsicmp(ext.wstring().c_str(), L".png") == 0)
+    {
+        hr = LoadFromPNGFile(curpath.wstring().c_str(), &info, *image);
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+    }
+#endif
+    else
+    {
+    #if USE_WIC
+        // WIC shares the same filter values for mode and dither
+    #else
+        RaiseError(L"ERROR: This format requires WIC\n");
+        return 1;
+    #endif
+    }
+
+    PrintInfoVerbose(info, isXbox);
+
+    size_t tMips = (!mipLevels && info.mipLevels > 1) ? info.mipLevels : mipLevels;
+
+    // Convert texture
+    PrintVerbose(L" as");
+    fflush(stdout);
+
+    // --- Planar ------------------------------------------------------------------
+    if (IsPlanar(info.format))
+    {
+        auto img = image->GetImage(0, 0, 0);
+        assert(img);
+        const size_t nimg = image->GetImageCount();
+
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
         {
             RaiseError(L"\nERROR:Memory allocation failed\n");
             return 1;
         }
 
-        std::filesystem::path curpath(pConv->szSrc);
-        auto const ext = curpath.extension();
-
-    #ifndef USE_XBOX_EXTS
-        constexpr
-    #endif
-        bool isXbox = false;
-        if (_wcsicmp(ext.wstring().c_str(), L".dds") == 0 || _wcsicmp(ext.wstring().c_str(), L".ddx") == 0)
+        hr = ConvertToSinglePlane(img, nimg, info, *timage);
+        if (FAILED(hr))
         {
-        #ifdef USE_XBOX_EXTS
-            hr = Xbox::GetMetadataFromDDSFile(curpath.wstring().c_str(), info, isXbox);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                retVal = 1;
-                continue;
-            }
-
-            if (isXbox)
-            {
-                Xbox::XboxImage xbox;
-
-                hr = Xbox::LoadFromDDSFile(curpath.wstring().c_str(), &info, xbox);
-                if (SUCCEEDED(hr))
-                {
-                    hr = Xbox::Detile(xbox, *image);
-                }
-            }
-            else
-        #endif // USE_XBOX_EXTS
-            {
-                DDS_FLAGS ddsFlags = DDS_FLAGS_ALLOW_LARGE_FILES;
-                if (dwOptions & (uint64_t(1) << OPT_DDS_DWORD_ALIGN))
-                    ddsFlags |= DDS_FLAGS_LEGACY_DWORD;
-                if (dwOptions & (uint64_t(1) << OPT_EXPAND_LUMINANCE))
-                    ddsFlags |= DDS_FLAGS_EXPAND_LUMINANCE;
-                if (dwOptions & (uint64_t(1) << OPT_DDS_BAD_DXTN_TAILS))
-                    ddsFlags |= DDS_FLAGS_BAD_DXTN_TAILS;
-                if (dwOptions & (uint64_t(1) << OPT_DDS_PERMISSIVE))
-                    ddsFlags |= DDS_FLAGS_PERMISSIVE;
-
-                hr = LoadFromDDSFile(curpath.wstring().c_str(), ddsFlags, &info, *image);
-            }
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                retVal = 1;
-                continue;
-            }
-
-            if (IsTypeless(info.format))
-            {
-                if (dwOptions & (uint64_t(1) << OPT_TYPELESS_UNORM))
-                {
-                    info.format = MakeTypelessUNORM(info.format);
-                }
-                else if (dwOptions & (uint64_t(1) << OPT_TYPELESS_FLOAT))
-                {
-                    info.format = MakeTypelessFLOAT(info.format);
-                }
-
-                if (IsTypeless(info.format))
-                {
-                    RaiseError(L" FAILED due to Typeless format %d\n", info.format);
-                    retVal = 1;
-                    continue;
-                }
-
-                image->OverrideFormat(info.format);
-            }
-        }
-    #if USE_WIC
-        else if (_wcsicmp(ext.wstring().c_str(), L".bmp") == 0)
-        {
-            hr = LoadFromBMPEx(curpath.wstring().c_str(), WIC_FLAGS_NONE | dwFilter, &info, *image);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                retVal = 1;
-                continue;
-            }
-        }
-    #endif
-        else if (_wcsicmp(ext.wstring().c_str(), L".tga") == 0)
-        {
-            TGA_FLAGS tgaFlags = (IsBGR(format)) ? TGA_FLAGS_BGR : TGA_FLAGS_NONE;
-            if (dwOptions & (uint64_t(1) << OPT_TGAZEROALPHA))
-            {
-                tgaFlags |= TGA_FLAGS_ALLOW_ALL_ZERO_ALPHA;
-            }
-
-            hr = LoadFromTGAFile(curpath.wstring().c_str(), tgaFlags, &info, *image);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                retVal = 1;
-                continue;
-            }
-        }
-        else if (_wcsicmp(ext.wstring().c_str(), L".hdr") == 0)
-        {
-            hr = LoadFromHDRFile(curpath.wstring().c_str(), &info, *image);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                retVal = 1;
-                continue;
-            }
-        }
-    #if USE_WIC
-        else if (_wcsicmp(ext.wstring().c_str(), L".ppm") == 0)
-        {
-            hr = LoadFromPortablePixMap(curpath.wstring().c_str(), &info, *image);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                retVal = 1;
-                continue;
-            }
-        }
-        else if (_wcsicmp(ext.wstring().c_str(), L".pfm") == 0)
-        {
-            hr = LoadFromPortablePixMapHDR(curpath.wstring().c_str(), &info, *image);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                retVal = 1;
-                continue;
-            }
-        }
-    #endif
-    #ifdef USE_OPENEXR
-        else if (_wcsicmp(ext.wstring().c_str(), L".exr") == 0)
-        {
-            hr = LoadFromEXRFile(curpath.wstring().c_str(), &info, *image);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                retVal = 1;
-                continue;
-            }
-        }
-    #endif
-    #ifdef USE_LIBJPEG
-        else if (_wcsicmp(ext.wstring().c_str(), L".jpg") == 0 || _wcsicmp(ext.wstring().c_str(), L".jpeg") == 0)
-        {
-            hr = LoadFromJPEGFile(curpath.wstring().c_str(), &info, *image);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                retVal = 1;
-                continue;
-            }
-        }
-    #endif
-    #ifdef USE_LIBPNG
-        else if (_wcsicmp(ext.wstring().c_str(), L".png") == 0)
-        {
-            hr = LoadFromPNGFile(curpath.wstring().c_str(), &info, *image);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                retVal = 1;
-                continue;
-            }
-        }
-    #endif
-        else
-        {
-        #if USE_WIC
-            // WIC shares the same filter values for mode and dither
-            static_assert(static_cast<int>(WIC_FLAGS_DITHER) == static_cast<int>(TEX_FILTER_DITHER), "WIC_FLAGS_* & TEX_FILTER_* should match");
-            static_assert(static_cast<int>(WIC_FLAGS_DITHER_DIFFUSION) == static_cast<int>(TEX_FILTER_DITHER_DIFFUSION), "WIC_FLAGS_* & TEX_FILTER_* should match");
-            static_assert(static_cast<int>(WIC_FLAGS_FILTER_POINT) == static_cast<int>(TEX_FILTER_POINT), "WIC_FLAGS_* & TEX_FILTER_* should match");
-            static_assert(static_cast<int>(WIC_FLAGS_FILTER_LINEAR) == static_cast<int>(TEX_FILTER_LINEAR), "WIC_FLAGS_* & TEX_FILTER_* should match");
-            static_assert(static_cast<int>(WIC_FLAGS_FILTER_CUBIC) == static_cast<int>(TEX_FILTER_CUBIC), "WIC_FLAGS_* & TEX_FILTER_* should match");
-            static_assert(static_cast<int>(WIC_FLAGS_FILTER_FANT) == static_cast<int>(TEX_FILTER_FANT), "WIC_FLAGS_* & TEX_FILTER_* should match");
-
-            WIC_FLAGS wicFlags = WIC_FLAGS_NONE | dwFilter;
-            if (FileType == CODEC_DDS)
-                wicFlags |= WIC_FLAGS_ALL_FRAMES;
-
-            hr = LoadFromWICFile(curpath.wstring().c_str(), wicFlags, &info, *image);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                retVal = 1;
-                if (hr == static_cast<HRESULT>(0xc00d5212) /* MF_E_TOPO_CODEC_NOT_FOUND */)
-                {
-                    if (_wcsicmp(ext.wstring().c_str(), L".heic") == 0 || _wcsicmp(ext.wstring().c_str(), L".heif") == 0)
-                    {
-                        wprintf(L"INFO: This format requires installing the HEIF Image Extensions - https://aka.ms/heif\n");
-                    }
-                    else if (_wcsicmp(ext.wstring().c_str(), L".webp") == 0)
-                    {
-                        wprintf(L"INFO: This format requires installing the WEBP Image Extensions - https://www.microsoft.com/p/webp-image-extensions/9pg2dk419drg\n");
-                    }
-                }
-                continue;
-            }
-        #else
-            RaiseError(L"ERROR: This format requires WIC\n");
-            retVal = 1;
-            continue;
-        #endif
-        }
-
-        PrintInfoVerbose(info, isXbox);
-
-        size_t tMips = (!mipLevels && info.mipLevels > 1) ? info.mipLevels : mipLevels;
-
-        // Convert texture
-        PrintVerbose(L" as");
-        fflush(stdout);
-
-        // --- Planar ------------------------------------------------------------------
-        if (IsPlanar(info.format))
-        {
-            auto img = image->GetImage(0, 0, 0);
-            assert(img);
-            const size_t nimg = image->GetImageCount();
-
-            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-            if (!timage)
-            {
-                RaiseError(L"\nERROR:Memory allocation failed\n");
-                return 1;
-            }
-
-            hr = ConvertToSinglePlane(img, nimg, info, *timage);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED [converttosingleplane] (%08X%ls)\n",
-                    static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                retVal = 1;
-                continue;
-            }
-
-            auto& tinfo = timage->GetMetadata();
-
-            info.format = tinfo.format;
-
-            assert(info.width == tinfo.width);
-            assert(info.height == tinfo.height);
-            assert(info.depth == tinfo.depth);
-            assert(info.arraySize == tinfo.arraySize);
-            assert(info.mipLevels == tinfo.mipLevels);
-            assert(info.miscFlags == tinfo.miscFlags);
-            assert(info.dimension == tinfo.dimension);
-
-            image.swap(timage);
-        }
-
-        const DXGI_FORMAT tformat = (format == DXGI_FORMAT_UNKNOWN) ? info.format : format;
-
-        // --- Decompress --------------------------------------------------------------
-        std::unique_ptr<ScratchImage> cimage;
-        if (IsCompressed(info.format))
-        {
-            // Direct3D can only create BC resources with multiple-of-4 top levels
-            if ((info.width % 4) != 0 || (info.height % 4) != 0)
-            {
-                if (dwOptions & (uint64_t(1) << OPT_BCNONMULT4FIX))
-                {
-                    std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-                    if (!timage)
-                    {
-                        RaiseError(L"\nERROR:Memory allocation failed\n");
-                        return 1;
-                    }
-
-                    // If we started with < 4x4 then no need to generate mips
-                    if (info.width < 4 && info.height < 4)
-                    {
-                        tMips = 1;
-                    }
-
-                    // Fix by changing size but also have to trim any mip-levels which can be invalid
-                    TexMetadata mdata = image->GetMetadata();
-                    mdata.width = (info.width + 3u) & ~0x3u;
-                    mdata.height = (info.height + 3u) & ~0x3u;
-                    mdata.mipLevels = 1;
-                    hr = timage->Initialize(mdata);
-                    if (FAILED(hr))
-                    {
-                        RaiseError(L" FAILED [BC non-multiple-of-4 fixup] (%08X%ls)\n",
-                            static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                        return 1;
-                    }
-
-                    if (mdata.dimension == TEX_DIMENSION_TEXTURE3D)
-                    {
-                        for (size_t d = 0; d < mdata.depth; ++d)
-                        {
-                            auto simg = image->GetImage(0, 0, d);
-                            auto dimg = timage->GetImage(0, 0, d);
-
-                            memcpy_s(dimg->pixels, dimg->slicePitch, simg->pixels, simg->slicePitch);
-                        }
-                    }
-                    else
-                    {
-                        for (size_t i = 0; i < mdata.arraySize; ++i)
-                        {
-                            auto simg = image->GetImage(0, i, 0);
-                            auto dimg = timage->GetImage(0, i, 0);
-
-                            memcpy_s(dimg->pixels, dimg->slicePitch, simg->pixels, simg->slicePitch);
-                        }
-                    }
-
-                    info.width = mdata.width;
-                    info.height = mdata.height;
-                    info.mipLevels = mdata.mipLevels;
-                    image.swap(timage);
-                }
-                else if (IsCompressed(tformat))
-                {
-                    non4bc = true;
-                }
-            }
-
-            auto img = image->GetImage(0, 0, 0);
-            assert(img);
-            const size_t nimg = image->GetImageCount();
-
-            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-            if (!timage)
-            {
-                RaiseError(L"\nERROR:Memory allocation failed\n");
-                return 1;
-            }
-
-            hr = Decompress(img, nimg, info, DXGI_FORMAT_UNKNOWN /* picks good default */, *timage);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED [decompress] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                retVal = 1;
-                continue;
-            }
-
-            auto& tinfo = timage->GetMetadata();
-
-            info.format = tinfo.format;
-
-            assert(info.width == tinfo.width);
-            assert(info.height == tinfo.height);
-            assert(info.depth == tinfo.depth);
-            assert(info.arraySize == tinfo.arraySize);
-            assert(info.mipLevels == tinfo.mipLevels);
-            assert(info.miscFlags == tinfo.miscFlags);
-            assert(info.dimension == tinfo.dimension);
-
-            if (FileType == CODEC_DDS)
-            {
-                // Keep the original compressed image in case we can reuse it
-                cimage.reset(image.release());
-                image.reset(timage.release());
-            }
-            else
-            {
-                image.swap(timage);
-            }
-        }
-
-        // --- Undo Premultiplied Alpha (if requested) ---------------------------------
-        if ((dwOptions & (uint64_t(1) << OPT_DEMUL_ALPHA))
-            && HasAlpha(info.format)
-            && info.format != DXGI_FORMAT_A8_UNORM)
-        {
-            if (info.GetAlphaMode() == TEX_ALPHA_MODE_STRAIGHT)
-            {
-                printf("\nWARNING: Image is already using straight alpha\n");
-            }
-            else if (!info.IsPMAlpha())
-            {
-                printf("\nWARNING: Image is not using premultipled alpha\n");
-            }
-            else
-            {
-                auto img = image->GetImage(0, 0, 0);
-                assert(img);
-                const size_t nimg = image->GetImageCount();
-
-                std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-                if (!timage)
-                {
-                    RaiseError(L"\nERROR:Memory allocation failed\n");
-                    return 1;
-                }
-
-                hr = PremultiplyAlpha(img, nimg, info, TEX_PMALPHA_REVERSE | dwSRGB, *timage);
-                if (FAILED(hr))
-                {
-                    RaiseError(L" FAILED [demultiply alpha] (%08X%ls)\n",
-                        static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                    retVal = 1;
-                    continue;
-                }
-
-                auto& tinfo = timage->GetMetadata();
-                info.miscFlags2 = tinfo.miscFlags2;
-
-                assert(info.width == tinfo.width);
-                assert(info.height == tinfo.height);
-                assert(info.depth == tinfo.depth);
-                assert(info.arraySize == tinfo.arraySize);
-                assert(info.mipLevels == tinfo.mipLevels);
-                assert(info.miscFlags == tinfo.miscFlags);
-                assert(info.dimension == tinfo.dimension);
-
-                image.swap(timage);
-                cimage.reset();
-            }
-        }
-
-        // --- Flip/Rotate -------------------------------------------------------------
-        if (dwOptions & ((uint64_t(1) << OPT_HFLIP) | (uint64_t(1) << OPT_VFLIP)))
-        {
-            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-            if (!timage)
-            {
-                RaiseError(L"\nERROR:Memory allocation failed\n");
-                return 1;
-            }
-
-            TEX_FR_FLAGS dwFlags = TEX_FR_ROTATE0;
-
-            if (dwOptions & (uint64_t(1) << OPT_HFLIP))
-                dwFlags |= TEX_FR_FLIP_HORIZONTAL;
-
-            if (dwOptions & (uint64_t(1) << OPT_VFLIP))
-                dwFlags |= TEX_FR_FLIP_VERTICAL;
-
-            assert(dwFlags != 0);
-
-        #if USE_WIC
-            hr = FlipRotate(image->GetImages(), image->GetImageCount(), image->GetMetadata(), dwFlags, *timage);
-        #else
-            RaiseError(L"ERROR: FlipRotate() requires WIC.\n");
+            RaiseError(L" FAILED [converttosingleplane] (%08X%ls)\n",
+                static_cast<unsigned int>(hr), GetErrorDesc(hr));
             return 1;
-        #endif
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED [fliprotate] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                return 1;
-            }
-
-            auto& tinfo = timage->GetMetadata();
-
-            info.width = tinfo.width;
-            info.height = tinfo.height;
-
-            assert(info.depth == tinfo.depth);
-            assert(info.arraySize == tinfo.arraySize);
-            assert(info.mipLevels == tinfo.mipLevels);
-            assert(info.miscFlags == tinfo.miscFlags);
-            assert(info.format == tinfo.format);
-            assert(info.dimension == tinfo.dimension);
-
-            image.swap(timage);
-            cimage.reset();
         }
 
-        // --- Resize ------------------------------------------------------------------
-        size_t twidth = (!width) ? info.width : width;
-        if (twidth > maxSize)
+        auto& tinfo = timage->GetMetadata();
+
+        info.format = tinfo.format;
+
+        assert(info.width == tinfo.width);
+        assert(info.height == tinfo.height);
+        assert(info.depth == tinfo.depth);
+        assert(info.arraySize == tinfo.arraySize);
+        assert(info.mipLevels == tinfo.mipLevels);
+        assert(info.miscFlags == tinfo.miscFlags);
+        assert(info.dimension == tinfo.dimension);
+
+        image.swap(timage);
+    }
+
+    const DXGI_FORMAT tformat = (format == DXGI_FORMAT_UNKNOWN) ? info.format : format;
+
+    // --- Decompress --------------------------------------------------------------
+    std::unique_ptr<ScratchImage> cimage;
+    if (IsCompressed(info.format))
+    {
+        // Direct3D can only create BC resources with multiple-of-4 top levels
+        if ((info.width % 4) != 0 || (info.height % 4) != 0)
         {
-            if (!width)
-                twidth = maxSize;
-            else
-                sizewarn = true;
-        }
-
-        size_t theight = (!height) ? info.height : height;
-        if (theight > maxSize)
-        {
-            if (!height)
-                theight = maxSize;
-            else
-                sizewarn = true;
-        }
-
-        if (dwOptions & (uint64_t(1) << OPT_FIT_POWEROF2))
-        {
-            FitPowerOf2(info.width, info.height, twidth, theight, maxSize);
-        }
-
-        if (info.width != twidth || info.height != theight)
-        {
-            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-            if (!timage)
-            {
-                RaiseError(L"\nERROR:Memory allocation failed\n");
-                return 1;
-            }
-
-            hr = Resize(image->GetImages(), image->GetImageCount(), image->GetMetadata(), twidth, theight, dwFilter | dwFilterOpts, *timage);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED [resize] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                return 1;
-            }
-
-            auto& tinfo = timage->GetMetadata();
-
-            assert(tinfo.width == twidth && tinfo.height == theight && tinfo.mipLevels == 1);
-            info.width = tinfo.width;
-            info.height = tinfo.height;
-            info.mipLevels = 1;
-
-            assert(info.depth == tinfo.depth);
-            assert(info.arraySize == tinfo.arraySize);
-            assert(info.miscFlags == tinfo.miscFlags);
-            assert(info.format == tinfo.format);
-            assert(info.dimension == tinfo.dimension);
-
-            image.swap(timage);
-            cimage.reset();
-
-            if (tMips > 0)
-            {
-                const size_t maxMips = (info.depth > 1)
-                    ? CountMips3D(info.width, info.height, info.depth)
-                    : CountMips(info.width, info.height);
-
-                if (tMips > maxMips)
-                {
-                    tMips = maxMips;
-                }
-            }
-        }
-
-        // --- Swizzle (if requested) --------------------------------------------------
-        if (swizzleElements[0] != 0 || swizzleElements[1] != 1 || swizzleElements[2] != 2 || swizzleElements[3] != 3
-            || zeroElements[0] != 0 || zeroElements[1] != 0 || zeroElements[2] != 0 || zeroElements[3] != 0
-            || oneElements[0] != 0 || oneElements[1] != 0 || oneElements[2] != 0 || oneElements[3] != 0)
-        {
-            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-            if (!timage)
-            {
-                RaiseError(L"\nERROR:Memory allocation failed\n");
-                return 1;
-            }
-
-            const XMVECTOR zc = XMVectorSelectControl(zeroElements[0], zeroElements[1], zeroElements[2], zeroElements[3]);
-            const XMVECTOR oc = XMVectorSelectControl(oneElements[0], oneElements[1], oneElements[2], oneElements[3]);
-
-            hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                [&, zc, oc](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                {
-                    UNREFERENCED_PARAMETER(y);
-
-                    for (size_t j = 0; j < w; ++j)
-                    {
-                        XMVECTOR pixel = XMVectorSwizzle(inPixels[j],
-                            swizzleElements[0], swizzleElements[1], swizzleElements[2], swizzleElements[3]);
-                        pixel = XMVectorSelect(pixel, g_XMZero, zc);
-                        outPixels[j] = XMVectorSelect(pixel, g_XMOne, oc);
-                    }
-                }, *timage);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED [swizzle] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                return 1;
-            }
-
-        #ifndef NDEBUG
-            auto& tinfo = timage->GetMetadata();
-        #endif
-
-            assert(info.width == tinfo.width);
-            assert(info.height == tinfo.height);
-            assert(info.depth == tinfo.depth);
-            assert(info.arraySize == tinfo.arraySize);
-            assert(info.mipLevels == tinfo.mipLevels);
-            assert(info.miscFlags == tinfo.miscFlags);
-            assert(info.format == tinfo.format);
-            assert(info.dimension == tinfo.dimension);
-
-            image.swap(timage);
-            cimage.reset();
-        }
-
-        // --- Color rotation (if requested) -------------------------------------------
-        if (dwRotateColor)
-        {
-            if (dwRotateColor == ROTATE_HDR10_TO_709 || dwRotateColor == ROTATE_P3D65_TO_709)
+            if (dwOptions & (uint64_t(1) << OPT_BCNONMULT4FIX))
             {
                 std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
                 if (!timage)
@@ -2863,685 +2437,22 @@ extern "C" __attribute__((visibility("default"))) int texconv(int argc, wchar_t*
                     return 1;
                 }
 
-                hr = Convert(image->GetImages(), image->GetImageCount(), image->GetMetadata(), DXGI_FORMAT_R16G16B16A16_FLOAT,
-                    dwFilter | dwFilterOpts | dwSRGB | dwConvert, alphaThreshold, *timage);
-                if (FAILED(hr))
+                // If we started with < 4x4 then no need to generate mips
+                if (info.width < 4 && info.height < 4)
                 {
-                    RaiseError(L" FAILED [convert] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                    return 1;
+                    tMips = 1;
                 }
 
-            #ifndef NDEBUG
-                auto& tinfo = timage->GetMetadata();
-            #endif
-
-                assert(tinfo.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
-                info.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-
-                assert(info.width == tinfo.width);
-                assert(info.height == tinfo.height);
-                assert(info.depth == tinfo.depth);
-                assert(info.arraySize == tinfo.arraySize);
-                assert(info.mipLevels == tinfo.mipLevels);
-                assert(info.miscFlags == tinfo.miscFlags);
-                assert(info.dimension == tinfo.dimension);
-
-                image.swap(timage);
-                cimage.reset();
-            }
-
-            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-            if (!timage)
-            {
-                RaiseError(L"\nERROR:Memory allocation failed\n");
-                return 1;
-            }
-
-            switch (dwRotateColor)
-            {
-            case ROTATE_709_TO_HDR10:
-                hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                    [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                    {
-                        UNREFERENCED_PARAMETER(y);
-
-                        const XMVECTOR paperWhite = XMVectorReplicate(paperWhiteNits);
-
-                        for (size_t j = 0; j < w; ++j)
-                        {
-                            XMVECTOR value = inPixels[j];
-
-                            XMVECTOR nvalue = XMVector3Transform(value, c_from709to2020);
-
-                            // Convert to ST.2084
-                            nvalue = XMVectorDivide(XMVectorMultiply(nvalue, paperWhite), c_MaxNitsFor2084);
-
-                            XMFLOAT4A tmp;
-                            XMStoreFloat4A(&tmp, nvalue);
-
-                            tmp.x = LinearToST2084(tmp.x);
-                            tmp.y = LinearToST2084(tmp.y);
-                            tmp.z = LinearToST2084(tmp.z);
-
-                            nvalue = XMLoadFloat4A(&tmp);
-
-                            value = XMVectorSelect(value, nvalue, g_XMSelect1110);
-
-                            outPixels[j] = value;
-                        }
-                    }, *timage);
-                break;
-
-            case ROTATE_709_TO_2020:
-                hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                    [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                    {
-                        UNREFERENCED_PARAMETER(y);
-
-                        for (size_t j = 0; j < w; ++j)
-                        {
-                            XMVECTOR value = inPixels[j];
-
-                            const XMVECTOR nvalue = XMVector3Transform(value, c_from709to2020);
-
-                            value = XMVectorSelect(value, nvalue, g_XMSelect1110);
-
-                            outPixels[j] = value;
-                        }
-                    }, *timage);
-                break;
-
-            case ROTATE_HDR10_TO_709:
-                hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                    [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                    {
-                        UNREFERENCED_PARAMETER(y);
-
-                        const XMVECTOR paperWhite = XMVectorReplicate(paperWhiteNits);
-
-                        for (size_t j = 0; j < w; ++j)
-                        {
-                            XMVECTOR value = inPixels[j];
-
-                            // Convert from ST.2084
-                            XMFLOAT4A tmp;
-                            XMStoreFloat4A(&tmp, value);
-
-                            tmp.x = ST2084ToLinear(tmp.x);
-                            tmp.y = ST2084ToLinear(tmp.y);
-                            tmp.z = ST2084ToLinear(tmp.z);
-
-                            XMVECTOR nvalue = XMLoadFloat4A(&tmp);
-
-                            nvalue = XMVectorDivide(XMVectorMultiply(nvalue, c_MaxNitsFor2084), paperWhite);
-
-                            nvalue = XMVector3Transform(nvalue, c_from2020to709);
-
-                            value = XMVectorSelect(value, nvalue, g_XMSelect1110);
-
-                            outPixels[j] = value;
-                        }
-                    }, *timage);
-                break;
-
-            case ROTATE_2020_TO_709:
-                hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                    [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                    {
-                        UNREFERENCED_PARAMETER(y);
-
-                        for (size_t j = 0; j < w; ++j)
-                        {
-                            XMVECTOR value = inPixels[j];
-
-                            const XMVECTOR nvalue = XMVector3Transform(value, c_from2020to709);
-
-                            value = XMVectorSelect(value, nvalue, g_XMSelect1110);
-
-                            outPixels[j] = value;
-                        }
-                    }, *timage);
-                break;
-
-            case ROTATE_P3D65_TO_HDR10:
-                hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                    [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                    {
-                        UNREFERENCED_PARAMETER(y);
-
-                        const XMVECTOR paperWhite = XMVectorReplicate(paperWhiteNits);
-
-                        for (size_t j = 0; j < w; ++j)
-                        {
-                            XMVECTOR value = inPixels[j];
-
-                            XMVECTOR nvalue = XMVector3Transform(value, c_fromP3D65to2020);
-
-                            // Convert to ST.2084
-                            nvalue = XMVectorDivide(XMVectorMultiply(nvalue, paperWhite), c_MaxNitsFor2084);
-
-                            XMFLOAT4A tmp;
-                            XMStoreFloat4A(&tmp, nvalue);
-
-                            tmp.x = LinearToST2084(tmp.x);
-                            tmp.y = LinearToST2084(tmp.y);
-                            tmp.z = LinearToST2084(tmp.z);
-
-                            nvalue = XMLoadFloat4A(&tmp);
-
-                            value = XMVectorSelect(value, nvalue, g_XMSelect1110);
-
-                            outPixels[j] = value;
-                        }
-                    }, *timage);
-                break;
-
-            case ROTATE_P3D65_TO_2020:
-                hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                    [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                    {
-                        UNREFERENCED_PARAMETER(y);
-
-                        for (size_t j = 0; j < w; ++j)
-                        {
-                            XMVECTOR value = inPixels[j];
-
-                            const XMVECTOR nvalue = XMVector3Transform(value, c_fromP3D65to2020);
-
-                            value = XMVectorSelect(value, nvalue, g_XMSelect1110);
-
-                            outPixels[j] = value;
-                        }
-                    }, *timage);
-                break;
-
-            case ROTATE_709_TO_P3D65:
-                hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                    [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                    {
-                        UNREFERENCED_PARAMETER(y);
-
-                        for (size_t j = 0; j < w; ++j)
-                        {
-                            XMVECTOR value = inPixels[j];
-
-                            const XMVECTOR nvalue = XMVector3Transform(value, c_from709toP3D65);
-
-                            value = XMVectorSelect(value, nvalue, g_XMSelect1110);
-
-                            outPixels[j] = value;
-                        }
-                    }, *timage);
-                break;
-
-            case ROTATE_P3D65_TO_709:
-                hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                    [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                    {
-                        UNREFERENCED_PARAMETER(y);
-
-                        for (size_t j = 0; j < w; ++j)
-                        {
-                            XMVECTOR value = inPixels[j];
-
-                            const XMVECTOR nvalue = XMVector3Transform(value, c_fromP3D65to709);
-
-                            value = XMVectorSelect(value, nvalue, g_XMSelect1110);
-
-                            outPixels[j] = value;
-                        }
-                    }, *timage);
-                break;
-
-            default:
-                hr = E_NOTIMPL;
-                break;
-            }
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED [rotate color apply] (%08X%ls)\n",
-                    static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                return 1;
-            }
-
-        #ifndef NDEBUG
-            auto& tinfo = timage->GetMetadata();
-        #endif
-
-            assert(info.width == tinfo.width);
-            assert(info.height == tinfo.height);
-            assert(info.depth == tinfo.depth);
-            assert(info.arraySize == tinfo.arraySize);
-            assert(info.mipLevels == tinfo.mipLevels);
-            assert(info.miscFlags == tinfo.miscFlags);
-            assert(info.format == tinfo.format);
-            assert(info.dimension == tinfo.dimension);
-
-            image.swap(timage);
-            cimage.reset();
-        }
-
-        // --- Tonemap (if requested) --------------------------------------------------
-        if (dwOptions & uint64_t(1) << OPT_TONEMAP)
-        {
-            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-            if (!timage)
-            {
-                RaiseError(L"\nERROR:Memory allocation failed\n");
-                return 1;
-            }
-
-            // Compute max luminosity across all images
-            XMVECTOR maxLum = XMVectorZero();
-            hr = EvaluateImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                [&](const XMVECTOR* pixels, size_t w, size_t y)
-                {
-                    UNREFERENCED_PARAMETER(y);
-
-                    for (size_t j = 0; j < w; ++j)
-                    {
-                        static const XMVECTORF32 s_luminance = { { { 0.3f, 0.59f, 0.11f, 0.f } } };
-
-                        XMVECTOR v = *pixels++;
-
-                        v = XMVector3Dot(v, s_luminance);
-
-                        maxLum = XMVectorMax(v, maxLum);
-                    }
-                });
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED [tonemap maxlum] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                return 1;
-            }
-
-            // Reinhard et al, "Photographic Tone Reproduction for Digital Images"
-            // http://www.cs.utah.edu/~reinhard/cdrom/
-            maxLum = XMVectorMultiply(maxLum, maxLum);
-
-            hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                {
-                    UNREFERENCED_PARAMETER(y);
-
-                    for (size_t j = 0; j < w; ++j)
-                    {
-                        XMVECTOR value = inPixels[j];
-
-                        const XMVECTOR scale = XMVectorDivide(
-                            XMVectorAdd(g_XMOne, XMVectorDivide(value, maxLum)),
-                            XMVectorAdd(g_XMOne, value));
-                        const XMVECTOR nvalue = XMVectorMultiply(value, scale);
-
-                        value = XMVectorSelect(value, nvalue, g_XMSelect1110);
-
-                        outPixels[j] = value;
-                    }
-                }, *timage);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED [tonemap apply] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                return 1;
-            }
-
-        #ifndef NDEBUG
-            auto& tinfo = timage->GetMetadata();
-        #endif
-
-            assert(info.width == tinfo.width);
-            assert(info.height == tinfo.height);
-            assert(info.depth == tinfo.depth);
-            assert(info.arraySize == tinfo.arraySize);
-            assert(info.mipLevels == tinfo.mipLevels);
-            assert(info.miscFlags == tinfo.miscFlags);
-            assert(info.format == tinfo.format);
-            assert(info.dimension == tinfo.dimension);
-
-            image.swap(timage);
-            cimage.reset();
-        }
-
-        // --- Convert -----------------------------------------------------------------
-        if (dwOptions & (uint64_t(1) << OPT_NORMAL_MAP))
-        {
-            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-            if (!timage)
-            {
-                RaiseError(L"\nERROR:Memory allocation failed\n");
-                return 1;
-            }
-
-            DXGI_FORMAT nmfmt = tformat;
-            if (IsCompressed(tformat))
-            {
-                switch (tformat)
-                {
-                case DXGI_FORMAT_BC4_SNORM:
-                case DXGI_FORMAT_BC5_SNORM:
-                    nmfmt = (BitsPerColor(info.format) > 8) ? DXGI_FORMAT_R16G16B16A16_SNORM : DXGI_FORMAT_R8G8B8A8_SNORM;
-                    break;
-
-                case DXGI_FORMAT_BC6H_SF16:
-                case DXGI_FORMAT_BC6H_UF16:
-                    nmfmt = DXGI_FORMAT_R32G32B32_FLOAT;
-                    break;
-
-                default:
-                    nmfmt = (BitsPerColor(info.format) > 8) ? DXGI_FORMAT_R16G16B16A16_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
-                    break;
-                }
-            }
-
-            hr = ComputeNormalMap(image->GetImages(), image->GetImageCount(), image->GetMetadata(), dwNormalMap, nmapAmplitude, nmfmt, *timage);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED [normalmap] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                return 1;
-            }
-
-            auto& tinfo = timage->GetMetadata();
-
-            assert(tinfo.format == nmfmt);
-            info.format = tinfo.format;
-
-            assert(info.width == tinfo.width);
-            assert(info.height == tinfo.height);
-            assert(info.depth == tinfo.depth);
-            assert(info.arraySize == tinfo.arraySize);
-            assert(info.mipLevels == tinfo.mipLevels);
-            assert(info.miscFlags == tinfo.miscFlags);
-            assert(info.dimension == tinfo.dimension);
-
-            image.swap(timage);
-            cimage.reset();
-        }
-        else if (info.format != tformat && !IsCompressed(tformat))
-        {
-            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-            if (!timage)
-            {
-                RaiseError(L"\nERROR:Memory allocation failed\n");
-                return 1;
-            }
-
-            hr = Convert(image->GetImages(), image->GetImageCount(), image->GetMetadata(), tformat,
-                dwFilter | dwFilterOpts | dwSRGB | dwConvert, alphaThreshold, *timage);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED [convert] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                return 1;
-            }
-
-            auto& tinfo = timage->GetMetadata();
-
-            assert(tinfo.format == tformat);
-            info.format = tinfo.format;
-
-            assert(info.width == tinfo.width);
-            assert(info.height == tinfo.height);
-            assert(info.depth == tinfo.depth);
-            assert(info.arraySize == tinfo.arraySize);
-            assert(info.mipLevels == tinfo.mipLevels);
-            assert(info.miscFlags == tinfo.miscFlags);
-            assert(info.dimension == tinfo.dimension);
-
-            image.swap(timage);
-            cimage.reset();
-        }
-
-        // --- ColorKey/ChromaKey ------------------------------------------------------
-        if ((dwOptions & (uint64_t(1) << OPT_COLORKEY))
-            && HasAlpha(info.format))
-        {
-            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-            if (!timage)
-            {
-                RaiseError(L"\nERROR:Memory allocation failed\n");
-                return 1;
-            }
-
-            XMVECTOR colorKeyValue = XMLoadColor(reinterpret_cast<const XMCOLOR*>(&colorKey));
-
-            hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                {
-                    static const XMVECTORF32 s_tolerance = { { { 0.2f, 0.2f, 0.2f, 0.f } } };
-
-                    UNREFERENCED_PARAMETER(y);
-
-                    for (size_t j = 0; j < w; ++j)
-                    {
-                        XMVECTOR value = inPixels[j];
-
-                        if (XMVector3NearEqual(value, colorKeyValue, s_tolerance))
-                        {
-                            value = g_XMZero;
-                        }
-                        else
-                        {
-                            value = XMVectorSelect(g_XMOne, value, g_XMSelect1110);
-                        }
-
-                        outPixels[j] = value;
-                    }
-                }, *timage);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED [colorkey] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                return 1;
-            }
-
-        #ifndef NDEBUG
-            auto& tinfo = timage->GetMetadata();
-        #endif
-
-            assert(info.width == tinfo.width);
-            assert(info.height == tinfo.height);
-            assert(info.depth == tinfo.depth);
-            assert(info.arraySize == tinfo.arraySize);
-            assert(info.mipLevels == tinfo.mipLevels);
-            assert(info.miscFlags == tinfo.miscFlags);
-            assert(info.format == tinfo.format);
-            assert(info.dimension == tinfo.dimension);
-
-            image.swap(timage);
-            cimage.reset();
-        }
-
-        // --- Invert Y Channel --------------------------------------------------------
-        if (dwOptions & (uint64_t(1) << OPT_INVERT_Y))
-        {
-            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-            if (!timage)
-            {
-                RaiseError(L"\nERROR:Memory allocation failed\n");
-                return 1;
-            }
-
-            hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                {
-                    static const XMVECTORU32 s_selecty = { { { XM_SELECT_0, XM_SELECT_1, XM_SELECT_0, XM_SELECT_0 } } };
-
-                    UNREFERENCED_PARAMETER(y);
-
-                    for (size_t j = 0; j < w; ++j)
-                    {
-                        const XMVECTOR value = inPixels[j];
-
-                        const XMVECTOR inverty = XMVectorSubtract(g_XMOne, value);
-
-                        outPixels[j] = XMVectorSelect(value, inverty, s_selecty);
-                    }
-                }, *timage);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED [inverty] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                return 1;
-            }
-
-        #ifndef NDEBUG
-            auto& tinfo = timage->GetMetadata();
-        #endif
-
-            assert(info.width == tinfo.width);
-            assert(info.height == tinfo.height);
-            assert(info.depth == tinfo.depth);
-            assert(info.arraySize == tinfo.arraySize);
-            assert(info.mipLevels == tinfo.mipLevels);
-            assert(info.miscFlags == tinfo.miscFlags);
-            assert(info.format == tinfo.format);
-            assert(info.dimension == tinfo.dimension);
-
-            image.swap(timage);
-            cimage.reset();
-        }
-
-        // --- Reconstruct Z Channel ---------------------------------------------------
-        if (dwOptions & (uint64_t(1) << OPT_RECONSTRUCT_Z))
-        {
-            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-            if (!timage)
-            {
-                RaiseError(L"\nERROR:Memory allocation failed\n");
-                return 1;
-            }
-
-            bool isunorm = (FormatDataType(info.format) == FORMAT_TYPE_UNORM) != 0;
-
-            hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                {
-                    static const XMVECTORU32 s_selectz = { { { XM_SELECT_0, XM_SELECT_0, XM_SELECT_1, XM_SELECT_0 } } };
-
-                    UNREFERENCED_PARAMETER(y);
-
-                    for (size_t j = 0; j < w; ++j)
-                    {
-                        const XMVECTOR value = inPixels[j];
-
-                        XMVECTOR z;
-                        if (isunorm)
-                        {
-                            XMVECTOR x2 = XMVectorMultiplyAdd(value, g_XMTwo, g_XMNegativeOne);
-                            x2 = XMVectorSqrt(XMVectorSubtract(g_XMOne, XMVector2Dot(x2, x2)));
-                            z = XMVectorMultiplyAdd(x2, g_XMOneHalf, g_XMOneHalf);
-                        }
-                        else
-                        {
-                            z = XMVectorSqrt(XMVectorSubtract(g_XMOne, XMVector2Dot(value, value)));
-                        }
-
-                        outPixels[j] = XMVectorSelect(value, z, s_selectz);
-                    }
-                }, *timage);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED [reconstructz] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                return 1;
-            }
-
-        #ifndef NDEBUG
-            auto& tinfo = timage->GetMetadata();
-        #endif
-
-            assert(info.width == tinfo.width);
-            assert(info.height == tinfo.height);
-            assert(info.depth == tinfo.depth);
-            assert(info.arraySize == tinfo.arraySize);
-            assert(info.mipLevels == tinfo.mipLevels);
-            assert(info.miscFlags == tinfo.miscFlags);
-            assert(info.format == tinfo.format);
-            assert(info.dimension == tinfo.dimension);
-
-            image.swap(timage);
-            cimage.reset();
-        }
-
-        // --- Determine whether preserve alpha coverage is required (if requested) ----
-        if (preserveAlphaCoverageRef > 0.0f && HasAlpha(info.format) && !image->IsAlphaAllOpaque())
-        {
-            preserveAlphaCoverage = true;
-        }
-
-        // --- Generate mips -----------------------------------------------------------
-        TEX_FILTER_FLAGS dwFilter3D = dwFilter;
-        if (!ispow2(info.width) || !ispow2(info.height) || !ispow2(info.depth))
-        {
-            if (!tMips || info.mipLevels != 1)
-            {
-                nonpow2warn = true;
-            }
-
-            if (info.dimension == TEX_DIMENSION_TEXTURE3D)
-            {
-                // Must force triangle filter for non-power-of-2 volume textures to get correct results
-                dwFilter3D = TEX_FILTER_TRIANGLE;
-            }
-        }
-
-        if ((!tMips || info.mipLevels != tMips || preserveAlphaCoverage) && (info.mipLevels != 1))
-        {
-            // Mips generation only works on a single base image, so strip off existing mip levels
-            // Also required for preserve alpha coverage so that existing mips are regenerated
-
-            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-            if (!timage)
-            {
-                RaiseError(L"\nERROR:Memory allocation failed\n");
-                return 1;
-            }
-
-            TexMetadata mdata = info;
-            mdata.mipLevels = 1;
-            hr = timage->Initialize(mdata);
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED [copy to single level] (%08X%ls)\n",
-                    static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                return 1;
-            }
-
-            if (info.dimension == TEX_DIMENSION_TEXTURE3D)
-            {
-                for (size_t d = 0; d < info.depth; ++d)
-                {
-                    hr = CopyRectangle(*image->GetImage(0, 0, d), Rect(0, 0, info.width, info.height),
-                        *timage->GetImage(0, 0, d), TEX_FILTER_DEFAULT, 0, 0);
-                    if (FAILED(hr))
-                    {
-                        RaiseError(L" FAILED [copy to single level] (%08X%ls)\n",
-                            static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                        return 1;
-                    }
-                }
-            }
-            else
-            {
-                for (size_t i = 0; i < info.arraySize; ++i)
-                {
-                    hr = CopyRectangle(*image->GetImage(0, i, 0), Rect(0, 0, info.width, info.height),
-                        *timage->GetImage(0, i, 0), TEX_FILTER_DEFAULT, 0, 0);
-                    if (FAILED(hr))
-                    {
-                        RaiseError(L" FAILED [copy to single level] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                        return 1;
-                    }
-                }
-            }
-
-            image.swap(timage);
-            info.mipLevels = 1;
-
-            if (cimage && (tMips == 1))
-            {
-                // Special case for trimming mips off compressed images and keeping the original compressed highest level mip
-                mdata = cimage->GetMetadata();
+                // Fix by changing size but also have to trim any mip-levels which can be invalid
+                TexMetadata mdata = image->GetMetadata();
+                mdata.width = (info.width + 3u) & ~0x3u;
+                mdata.height = (info.height + 3u) & ~0x3u;
                 mdata.mipLevels = 1;
                 hr = timage->Initialize(mdata);
                 if (FAILED(hr))
                 {
-                    RaiseError(L" FAILED [copy compressed to single level] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+                    RaiseError(L" FAILED [BC non-multiple-of-4 fixup] (%08X%ls)\n",
+                        static_cast<unsigned int>(hr), GetErrorDesc(hr));
                     return 1;
                 }
 
@@ -3549,7 +2460,7 @@ extern "C" __attribute__((visibility("default"))) int texconv(int argc, wchar_t*
                 {
                     for (size_t d = 0; d < mdata.depth; ++d)
                     {
-                        auto simg = cimage->GetImage(0, 0, d);
+                        auto simg = image->GetImage(0, 0, d);
                         auto dimg = timage->GetImage(0, 0, d);
 
                         memcpy_s(dimg->pixels, dimg->slicePitch, simg->pixels, simg->slicePitch);
@@ -3559,22 +2470,288 @@ extern "C" __attribute__((visibility("default"))) int texconv(int argc, wchar_t*
                 {
                     for (size_t i = 0; i < mdata.arraySize; ++i)
                     {
-                        auto simg = cimage->GetImage(0, i, 0);
+                        auto simg = image->GetImage(0, i, 0);
                         auto dimg = timage->GetImage(0, i, 0);
 
                         memcpy_s(dimg->pixels, dimg->slicePitch, simg->pixels, simg->slicePitch);
                     }
                 }
 
-                cimage.swap(timage);
+                info.width = mdata.width;
+                info.height = mdata.height;
+                info.mipLevels = mdata.mipLevels;
+                image.swap(timage);
             }
-            else
+            else if (IsCompressed(tformat))
             {
-                cimage.reset();
+                non4bc = true;
             }
         }
 
-        if ((!tMips || info.mipLevels != tMips) && (info.width > 1 || info.height > 1 || info.depth > 1))
+        auto img = image->GetImage(0, 0, 0);
+        assert(img);
+        const size_t nimg = image->GetImageCount();
+
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
+        {
+            RaiseError(L"\nERROR:Memory allocation failed\n");
+            return 1;
+        }
+
+        hr = Decompress(img, nimg, info, DXGI_FORMAT_UNKNOWN /* picks good default */, *timage);
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [decompress] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+        auto& tinfo = timage->GetMetadata();
+
+        info.format = tinfo.format;
+
+        assert(info.width == tinfo.width);
+        assert(info.height == tinfo.height);
+        assert(info.depth == tinfo.depth);
+        assert(info.arraySize == tinfo.arraySize);
+        assert(info.mipLevels == tinfo.mipLevels);
+        assert(info.miscFlags == tinfo.miscFlags);
+        assert(info.dimension == tinfo.dimension);
+
+        if (FileType == CODEC_DDS)
+        {
+            // Keep the original compressed image in case we can reuse it
+            cimage.reset(image.release());
+            image.reset(timage.release());
+        }
+        else
+        {
+            image.swap(timage);
+        }
+    }
+
+    // --- Undo Premultiplied Alpha (if requested) ---------------------------------
+    if ((dwOptions & (uint64_t(1) << OPT_DEMUL_ALPHA))
+        && HasAlpha(info.format)
+        && info.format != DXGI_FORMAT_A8_UNORM)
+    {
+        if (info.GetAlphaMode() == TEX_ALPHA_MODE_STRAIGHT)
+        {
+            printf("\nWARNING: Image is already using straight alpha\n");
+        }
+        else if (!info.IsPMAlpha())
+        {
+            printf("\nWARNING: Image is not using premultipled alpha\n");
+        }
+        else
+        {
+            auto img = image->GetImage(0, 0, 0);
+            assert(img);
+            const size_t nimg = image->GetImageCount();
+
+            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+            if (!timage)
+            {
+                RaiseError(L"\nERROR:Memory allocation failed\n");
+                return 1;
+            }
+
+            hr = PremultiplyAlpha(img, nimg, info, TEX_PMALPHA_REVERSE | dwSRGB, *timage);
+            if (FAILED(hr))
+            {
+                RaiseError(L" FAILED [demultiply alpha] (%08X%ls)\n",
+                    static_cast<unsigned int>(hr), GetErrorDesc(hr));
+                return 1;
+            }
+
+            auto& tinfo = timage->GetMetadata();
+            info.miscFlags2 = tinfo.miscFlags2;
+
+            assert(info.width == tinfo.width);
+            assert(info.height == tinfo.height);
+            assert(info.depth == tinfo.depth);
+            assert(info.arraySize == tinfo.arraySize);
+            assert(info.mipLevels == tinfo.mipLevels);
+            assert(info.miscFlags == tinfo.miscFlags);
+            assert(info.dimension == tinfo.dimension);
+
+            image.swap(timage);
+            cimage.reset();
+        }
+    }
+
+    // --- Flip/Rotate -------------------------------------------------------------
+    if (dwOptions & ((uint64_t(1) << OPT_HFLIP) | (uint64_t(1) << OPT_VFLIP)))
+    {
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
+        {
+            RaiseError(L"\nERROR:Memory allocation failed\n");
+            return 1;
+        }
+
+        TEX_FR_FLAGS dwFlags = TEX_FR_ROTATE0;
+
+        if (dwOptions & (uint64_t(1) << OPT_HFLIP))
+            dwFlags |= TEX_FR_FLIP_HORIZONTAL;
+
+        if (dwOptions & (uint64_t(1) << OPT_VFLIP))
+            dwFlags |= TEX_FR_FLIP_VERTICAL;
+
+        assert(dwFlags != 0);
+
+    #if USE_WIC
+        hr = FlipRotate(image->GetImages(), image->GetImageCount(), image->GetMetadata(), dwFlags, *timage);
+    #else
+        RaiseError(L"ERROR: FlipRotate() requires WIC.\n");
+        return 1;
+    #endif
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [fliprotate] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+        auto& tinfo = timage->GetMetadata();
+
+        info.width = tinfo.width;
+        info.height = tinfo.height;
+
+        assert(info.depth == tinfo.depth);
+        assert(info.arraySize == tinfo.arraySize);
+        assert(info.mipLevels == tinfo.mipLevels);
+        assert(info.miscFlags == tinfo.miscFlags);
+        assert(info.format == tinfo.format);
+        assert(info.dimension == tinfo.dimension);
+
+        image.swap(timage);
+        cimage.reset();
+    }
+
+    // --- Resize ------------------------------------------------------------------
+    size_t twidth = (!width) ? info.width : width;
+    if (twidth > maxSize)
+    {
+        if (!width)
+            twidth = maxSize;
+        else
+            sizewarn = true;
+    }
+
+    size_t theight = (!height) ? info.height : height;
+    if (theight > maxSize)
+    {
+        if (!height)
+            theight = maxSize;
+        else
+            sizewarn = true;
+    }
+
+    if (dwOptions & (uint64_t(1) << OPT_FIT_POWEROF2))
+    {
+        FitPowerOf2(info.width, info.height, twidth, theight, maxSize);
+    }
+
+    if (info.width != twidth || info.height != theight)
+    {
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
+        {
+            RaiseError(L"\nERROR:Memory allocation failed\n");
+            return 1;
+        }
+
+        hr = Resize(image->GetImages(), image->GetImageCount(), image->GetMetadata(), twidth, theight, dwFilter | dwFilterOpts, *timage);
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [resize] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+        auto& tinfo = timage->GetMetadata();
+
+        assert(tinfo.width == twidth && tinfo.height == theight && tinfo.mipLevels == 1);
+        info.width = tinfo.width;
+        info.height = tinfo.height;
+        info.mipLevels = 1;
+
+        assert(info.depth == tinfo.depth);
+        assert(info.arraySize == tinfo.arraySize);
+        assert(info.miscFlags == tinfo.miscFlags);
+        assert(info.format == tinfo.format);
+        assert(info.dimension == tinfo.dimension);
+
+        image.swap(timage);
+        cimage.reset();
+
+        if (tMips > 0)
+        {
+            const size_t maxMips = (info.depth > 1)
+                ? CountMips3D(info.width, info.height, info.depth)
+                : CountMips(info.width, info.height);
+
+            if (tMips > maxMips)
+            {
+                tMips = maxMips;
+            }
+        }
+    }
+
+    // --- Swizzle (if requested) --------------------------------------------------
+    if (swizzleElements[0] != 0 || swizzleElements[1] != 1 || swizzleElements[2] != 2 || swizzleElements[3] != 3
+        || zeroElements[0] != 0 || zeroElements[1] != 0 || zeroElements[2] != 0 || zeroElements[3] != 0
+        || oneElements[0] != 0 || oneElements[1] != 0 || oneElements[2] != 0 || oneElements[3] != 0)
+    {
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
+        {
+            RaiseError(L"\nERROR:Memory allocation failed\n");
+            return 1;
+        }
+
+        const XMVECTOR zc = XMVectorSelectControl(zeroElements[0], zeroElements[1], zeroElements[2], zeroElements[3]);
+        const XMVECTOR oc = XMVectorSelectControl(oneElements[0], oneElements[1], oneElements[2], oneElements[3]);
+
+        hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+            [&, zc, oc](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+            {
+                UNREFERENCED_PARAMETER(y);
+
+                for (size_t j = 0; j < w; ++j)
+                {
+                    XMVECTOR pixel = XMVectorSwizzle(inPixels[j],
+                        swizzleElements[0], swizzleElements[1], swizzleElements[2], swizzleElements[3]);
+                    pixel = XMVectorSelect(pixel, g_XMZero, zc);
+                    outPixels[j] = XMVectorSelect(pixel, g_XMOne, oc);
+                }
+            }, *timage);
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [swizzle] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+    #ifndef NDEBUG
+        auto& tinfo = timage->GetMetadata();
+    #endif
+
+        assert(info.width == tinfo.width);
+        assert(info.height == tinfo.height);
+        assert(info.depth == tinfo.depth);
+        assert(info.arraySize == tinfo.arraySize);
+        assert(info.mipLevels == tinfo.mipLevels);
+        assert(info.miscFlags == tinfo.miscFlags);
+        assert(info.format == tinfo.format);
+        assert(info.dimension == tinfo.dimension);
+
+        image.swap(timage);
+        cimage.reset();
+    }
+
+    // --- Color rotation (if requested) -------------------------------------------
+    if (dwRotateColor)
+    {
+        if (dwRotateColor == ROTATE_HDR10_TO_709 || dwRotateColor == ROTATE_P3D65_TO_709)
         {
             std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
             if (!timage)
@@ -3583,38 +2760,817 @@ extern "C" __attribute__((visibility("default"))) int texconv(int argc, wchar_t*
                 return 1;
             }
 
-            if (info.dimension == TEX_DIMENSION_TEXTURE3D)
-            {
-                hr = GenerateMipMaps3D(image->GetImages(), image->GetImageCount(), image->GetMetadata(), dwFilter3D | dwFilterOpts, tMips, *timage);
-            }
-            else
-            {
-                hr = GenerateMipMaps(image->GetImages(), image->GetImageCount(), image->GetMetadata(), dwFilter | dwFilterOpts, tMips, *timage);
-            }
+            hr = Convert(image->GetImages(), image->GetImageCount(), image->GetMetadata(), DXGI_FORMAT_R16G16B16A16_FLOAT,
+                dwFilter | dwFilterOpts | dwSRGB | dwConvert, alphaThreshold, *timage);
             if (FAILED(hr))
             {
-                RaiseError(L" FAILED [mipmaps] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+                RaiseError(L" FAILED [convert] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
                 return 1;
             }
 
+        #ifndef NDEBUG
             auto& tinfo = timage->GetMetadata();
-            info.mipLevels = tinfo.mipLevels;
+        #endif
+
+            assert(tinfo.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+            info.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
 
             assert(info.width == tinfo.width);
             assert(info.height == tinfo.height);
             assert(info.depth == tinfo.depth);
             assert(info.arraySize == tinfo.arraySize);
+            assert(info.mipLevels == tinfo.mipLevels);
             assert(info.miscFlags == tinfo.miscFlags);
-            assert(info.format == tinfo.format);
             assert(info.dimension == tinfo.dimension);
 
             image.swap(timage);
             cimage.reset();
         }
 
-        // --- Preserve mipmap alpha coverage (if requested) ---------------------------
-        if (preserveAlphaCoverage && info.mipLevels != 1 && (info.dimension != TEX_DIMENSION_TEXTURE3D))
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
         {
+            RaiseError(L"\nERROR:Memory allocation failed\n");
+            return 1;
+        }
+
+        switch (dwRotateColor)
+        {
+        case ROTATE_709_TO_HDR10:
+            hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+                [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+                {
+                    UNREFERENCED_PARAMETER(y);
+
+                    const XMVECTOR paperWhite = XMVectorReplicate(paperWhiteNits);
+
+                    for (size_t j = 0; j < w; ++j)
+                    {
+                        XMVECTOR value = inPixels[j];
+
+                        XMVECTOR nvalue = XMVector3Transform(value, c_from709to2020);
+
+                        // Convert to ST.2084
+                        nvalue = XMVectorDivide(XMVectorMultiply(nvalue, paperWhite), c_MaxNitsFor2084);
+
+                        XMFLOAT4A tmp;
+                        XMStoreFloat4A(&tmp, nvalue);
+
+                        tmp.x = LinearToST2084(tmp.x);
+                        tmp.y = LinearToST2084(tmp.y);
+                        tmp.z = LinearToST2084(tmp.z);
+
+                        nvalue = XMLoadFloat4A(&tmp);
+
+                        value = XMVectorSelect(value, nvalue, g_XMSelect1110);
+
+                        outPixels[j] = value;
+                    }
+                }, *timage);
+            break;
+
+        case ROTATE_709_TO_2020:
+            hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+                [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+                {
+                    UNREFERENCED_PARAMETER(y);
+
+                    for (size_t j = 0; j < w; ++j)
+                    {
+                        XMVECTOR value = inPixels[j];
+
+                        const XMVECTOR nvalue = XMVector3Transform(value, c_from709to2020);
+
+                        value = XMVectorSelect(value, nvalue, g_XMSelect1110);
+
+                        outPixels[j] = value;
+                    }
+                }, *timage);
+            break;
+
+        case ROTATE_HDR10_TO_709:
+            hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+                [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+                {
+                    UNREFERENCED_PARAMETER(y);
+
+                    const XMVECTOR paperWhite = XMVectorReplicate(paperWhiteNits);
+
+                    for (size_t j = 0; j < w; ++j)
+                    {
+                        XMVECTOR value = inPixels[j];
+
+                        // Convert from ST.2084
+                        XMFLOAT4A tmp;
+                        XMStoreFloat4A(&tmp, value);
+
+                        tmp.x = ST2084ToLinear(tmp.x);
+                        tmp.y = ST2084ToLinear(tmp.y);
+                        tmp.z = ST2084ToLinear(tmp.z);
+
+                        XMVECTOR nvalue = XMLoadFloat4A(&tmp);
+
+                        nvalue = XMVectorDivide(XMVectorMultiply(nvalue, c_MaxNitsFor2084), paperWhite);
+
+                        nvalue = XMVector3Transform(nvalue, c_from2020to709);
+
+                        value = XMVectorSelect(value, nvalue, g_XMSelect1110);
+
+                        outPixels[j] = value;
+                    }
+                }, *timage);
+            break;
+
+        case ROTATE_2020_TO_709:
+            hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+                [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+                {
+                    UNREFERENCED_PARAMETER(y);
+
+                    for (size_t j = 0; j < w; ++j)
+                    {
+                        XMVECTOR value = inPixels[j];
+
+                        const XMVECTOR nvalue = XMVector3Transform(value, c_from2020to709);
+
+                        value = XMVectorSelect(value, nvalue, g_XMSelect1110);
+
+                        outPixels[j] = value;
+                    }
+                }, *timage);
+            break;
+
+        case ROTATE_P3D65_TO_HDR10:
+            hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+                [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+                {
+                    UNREFERENCED_PARAMETER(y);
+
+                    const XMVECTOR paperWhite = XMVectorReplicate(paperWhiteNits);
+
+                    for (size_t j = 0; j < w; ++j)
+                    {
+                        XMVECTOR value = inPixels[j];
+
+                        XMVECTOR nvalue = XMVector3Transform(value, c_fromP3D65to2020);
+
+                        // Convert to ST.2084
+                        nvalue = XMVectorDivide(XMVectorMultiply(nvalue, paperWhite), c_MaxNitsFor2084);
+
+                        XMFLOAT4A tmp;
+                        XMStoreFloat4A(&tmp, nvalue);
+
+                        tmp.x = LinearToST2084(tmp.x);
+                        tmp.y = LinearToST2084(tmp.y);
+                        tmp.z = LinearToST2084(tmp.z);
+
+                        nvalue = XMLoadFloat4A(&tmp);
+
+                        value = XMVectorSelect(value, nvalue, g_XMSelect1110);
+
+                        outPixels[j] = value;
+                    }
+                }, *timage);
+            break;
+
+        case ROTATE_P3D65_TO_2020:
+            hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+                [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+                {
+                    UNREFERENCED_PARAMETER(y);
+
+                    for (size_t j = 0; j < w; ++j)
+                    {
+                        XMVECTOR value = inPixels[j];
+
+                        const XMVECTOR nvalue = XMVector3Transform(value, c_fromP3D65to2020);
+
+                        value = XMVectorSelect(value, nvalue, g_XMSelect1110);
+
+                        outPixels[j] = value;
+                    }
+                }, *timage);
+            break;
+
+        case ROTATE_709_TO_P3D65:
+            hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+                [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+                {
+                    UNREFERENCED_PARAMETER(y);
+
+                    for (size_t j = 0; j < w; ++j)
+                    {
+                        XMVECTOR value = inPixels[j];
+
+                        const XMVECTOR nvalue = XMVector3Transform(value, c_from709toP3D65);
+
+                        value = XMVectorSelect(value, nvalue, g_XMSelect1110);
+
+                        outPixels[j] = value;
+                    }
+                }, *timage);
+            break;
+
+        case ROTATE_P3D65_TO_709:
+            hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+                [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+                {
+                    UNREFERENCED_PARAMETER(y);
+
+                    for (size_t j = 0; j < w; ++j)
+                    {
+                        XMVECTOR value = inPixels[j];
+
+                        const XMVECTOR nvalue = XMVector3Transform(value, c_fromP3D65to709);
+
+                        value = XMVectorSelect(value, nvalue, g_XMSelect1110);
+
+                        outPixels[j] = value;
+                    }
+                }, *timage);
+            break;
+
+        default:
+            hr = E_NOTIMPL;
+            break;
+        }
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [rotate color apply] (%08X%ls)\n",
+                static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+    #ifndef NDEBUG
+        auto& tinfo = timage->GetMetadata();
+    #endif
+
+        assert(info.width == tinfo.width);
+        assert(info.height == tinfo.height);
+        assert(info.depth == tinfo.depth);
+        assert(info.arraySize == tinfo.arraySize);
+        assert(info.mipLevels == tinfo.mipLevels);
+        assert(info.miscFlags == tinfo.miscFlags);
+        assert(info.format == tinfo.format);
+        assert(info.dimension == tinfo.dimension);
+
+        image.swap(timage);
+        cimage.reset();
+    }
+
+    // --- Tonemap (if requested) --------------------------------------------------
+    if (dwOptions & uint64_t(1) << OPT_TONEMAP)
+    {
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
+        {
+            RaiseError(L"\nERROR:Memory allocation failed\n");
+            return 1;
+        }
+
+        // Compute max luminosity across all images
+        XMVECTOR maxLum = XMVectorZero();
+        hr = EvaluateImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+            [&](const XMVECTOR* pixels, size_t w, size_t y)
+            {
+                UNREFERENCED_PARAMETER(y);
+
+                for (size_t j = 0; j < w; ++j)
+                {
+                    static const XMVECTORF32 s_luminance = { { { 0.3f, 0.59f, 0.11f, 0.f } } };
+
+                    XMVECTOR v = *pixels++;
+
+                    v = XMVector3Dot(v, s_luminance);
+
+                    maxLum = XMVectorMax(v, maxLum);
+                }
+            });
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [tonemap maxlum] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+        // Reinhard et al, "Photographic Tone Reproduction for Digital Images"
+        // http://www.cs.utah.edu/~reinhard/cdrom/
+        maxLum = XMVectorMultiply(maxLum, maxLum);
+
+        hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+            [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+            {
+                UNREFERENCED_PARAMETER(y);
+
+                for (size_t j = 0; j < w; ++j)
+                {
+                    XMVECTOR value = inPixels[j];
+
+                    const XMVECTOR scale = XMVectorDivide(
+                        XMVectorAdd(g_XMOne, XMVectorDivide(value, maxLum)),
+                        XMVectorAdd(g_XMOne, value));
+                    const XMVECTOR nvalue = XMVectorMultiply(value, scale);
+
+                    value = XMVectorSelect(value, nvalue, g_XMSelect1110);
+
+                    outPixels[j] = value;
+                }
+            }, *timage);
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [tonemap apply] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+    #ifndef NDEBUG
+        auto& tinfo = timage->GetMetadata();
+    #endif
+
+        assert(info.width == tinfo.width);
+        assert(info.height == tinfo.height);
+        assert(info.depth == tinfo.depth);
+        assert(info.arraySize == tinfo.arraySize);
+        assert(info.mipLevels == tinfo.mipLevels);
+        assert(info.miscFlags == tinfo.miscFlags);
+        assert(info.format == tinfo.format);
+        assert(info.dimension == tinfo.dimension);
+
+        image.swap(timage);
+        cimage.reset();
+    }
+
+    // --- Convert -----------------------------------------------------------------
+    if (dwOptions & (uint64_t(1) << OPT_NORMAL_MAP))
+    {
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
+        {
+            RaiseError(L"\nERROR:Memory allocation failed\n");
+            return 1;
+        }
+
+        DXGI_FORMAT nmfmt = tformat;
+        if (IsCompressed(tformat))
+        {
+            switch (tformat)
+            {
+            case DXGI_FORMAT_BC4_SNORM:
+            case DXGI_FORMAT_BC5_SNORM:
+                nmfmt = (BitsPerColor(info.format) > 8) ? DXGI_FORMAT_R16G16B16A16_SNORM : DXGI_FORMAT_R8G8B8A8_SNORM;
+                break;
+
+            case DXGI_FORMAT_BC6H_SF16:
+            case DXGI_FORMAT_BC6H_UF16:
+                nmfmt = DXGI_FORMAT_R32G32B32_FLOAT;
+                break;
+
+            default:
+                nmfmt = (BitsPerColor(info.format) > 8) ? DXGI_FORMAT_R16G16B16A16_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
+                break;
+            }
+        }
+
+        hr = ComputeNormalMap(image->GetImages(), image->GetImageCount(), image->GetMetadata(), dwNormalMap, nmapAmplitude, nmfmt, *timage);
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [normalmap] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+        auto& tinfo = timage->GetMetadata();
+
+        assert(tinfo.format == nmfmt);
+        info.format = tinfo.format;
+
+        assert(info.width == tinfo.width);
+        assert(info.height == tinfo.height);
+        assert(info.depth == tinfo.depth);
+        assert(info.arraySize == tinfo.arraySize);
+        assert(info.mipLevels == tinfo.mipLevels);
+        assert(info.miscFlags == tinfo.miscFlags);
+        assert(info.dimension == tinfo.dimension);
+
+        image.swap(timage);
+        cimage.reset();
+    }
+    else if (info.format != tformat && !IsCompressed(tformat))
+    {
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
+        {
+            RaiseError(L"\nERROR:Memory allocation failed\n");
+            return 1;
+        }
+
+        hr = Convert(image->GetImages(), image->GetImageCount(), image->GetMetadata(), tformat,
+            dwFilter | dwFilterOpts | dwSRGB | dwConvert, alphaThreshold, *timage);
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [convert] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+        auto& tinfo = timage->GetMetadata();
+
+        assert(tinfo.format == tformat);
+        info.format = tinfo.format;
+
+        assert(info.width == tinfo.width);
+        assert(info.height == tinfo.height);
+        assert(info.depth == tinfo.depth);
+        assert(info.arraySize == tinfo.arraySize);
+        assert(info.mipLevels == tinfo.mipLevels);
+        assert(info.miscFlags == tinfo.miscFlags);
+        assert(info.dimension == tinfo.dimension);
+
+        image.swap(timage);
+        cimage.reset();
+    }
+
+    // --- ColorKey/ChromaKey ------------------------------------------------------
+    if ((dwOptions & (uint64_t(1) << OPT_COLORKEY))
+        && HasAlpha(info.format))
+    {
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
+        {
+            RaiseError(L"\nERROR:Memory allocation failed\n");
+            return 1;
+        }
+
+        XMVECTOR colorKeyValue = XMLoadColor(reinterpret_cast<const XMCOLOR*>(&colorKey));
+
+        hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+            [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+            {
+                static const XMVECTORF32 s_tolerance = { { { 0.2f, 0.2f, 0.2f, 0.f } } };
+
+                UNREFERENCED_PARAMETER(y);
+
+                for (size_t j = 0; j < w; ++j)
+                {
+                    XMVECTOR value = inPixels[j];
+
+                    if (XMVector3NearEqual(value, colorKeyValue, s_tolerance))
+                    {
+                        value = g_XMZero;
+                    }
+                    else
+                    {
+                        value = XMVectorSelect(g_XMOne, value, g_XMSelect1110);
+                    }
+
+                    outPixels[j] = value;
+                }
+            }, *timage);
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [colorkey] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+    #ifndef NDEBUG
+        auto& tinfo = timage->GetMetadata();
+    #endif
+
+        assert(info.width == tinfo.width);
+        assert(info.height == tinfo.height);
+        assert(info.depth == tinfo.depth);
+        assert(info.arraySize == tinfo.arraySize);
+        assert(info.mipLevels == tinfo.mipLevels);
+        assert(info.miscFlags == tinfo.miscFlags);
+        assert(info.format == tinfo.format);
+        assert(info.dimension == tinfo.dimension);
+
+        image.swap(timage);
+        cimage.reset();
+    }
+
+    // --- Invert Y Channel --------------------------------------------------------
+    if (dwOptions & (uint64_t(1) << OPT_INVERT_Y))
+    {
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
+        {
+            RaiseError(L"\nERROR:Memory allocation failed\n");
+            return 1;
+        }
+
+        hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+            [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+            {
+                static const XMVECTORU32 s_selecty = { { { XM_SELECT_0, XM_SELECT_1, XM_SELECT_0, XM_SELECT_0 } } };
+
+                UNREFERENCED_PARAMETER(y);
+
+                for (size_t j = 0; j < w; ++j)
+                {
+                    const XMVECTOR value = inPixels[j];
+
+                    const XMVECTOR inverty = XMVectorSubtract(g_XMOne, value);
+
+                    outPixels[j] = XMVectorSelect(value, inverty, s_selecty);
+                }
+            }, *timage);
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [inverty] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+    #ifndef NDEBUG
+        auto& tinfo = timage->GetMetadata();
+    #endif
+
+        assert(info.width == tinfo.width);
+        assert(info.height == tinfo.height);
+        assert(info.depth == tinfo.depth);
+        assert(info.arraySize == tinfo.arraySize);
+        assert(info.mipLevels == tinfo.mipLevels);
+        assert(info.miscFlags == tinfo.miscFlags);
+        assert(info.format == tinfo.format);
+        assert(info.dimension == tinfo.dimension);
+
+        image.swap(timage);
+        cimage.reset();
+    }
+
+    // --- Reconstruct Z Channel ---------------------------------------------------
+    if (dwOptions & (uint64_t(1) << OPT_RECONSTRUCT_Z))
+    {
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
+        {
+            RaiseError(L"\nERROR:Memory allocation failed\n");
+            return 1;
+        }
+
+        bool isunorm = (FormatDataType(info.format) == FORMAT_TYPE_UNORM) != 0;
+
+        hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+            [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+            {
+                static const XMVECTORU32 s_selectz = { { { XM_SELECT_0, XM_SELECT_0, XM_SELECT_1, XM_SELECT_0 } } };
+
+                UNREFERENCED_PARAMETER(y);
+
+                for (size_t j = 0; j < w; ++j)
+                {
+                    const XMVECTOR value = inPixels[j];
+
+                    XMVECTOR z;
+                    if (isunorm)
+                    {
+                        XMVECTOR x2 = XMVectorMultiplyAdd(value, g_XMTwo, g_XMNegativeOne);
+                        x2 = XMVectorSqrt(XMVectorSubtract(g_XMOne, XMVector2Dot(x2, x2)));
+                        z = XMVectorMultiplyAdd(x2, g_XMOneHalf, g_XMOneHalf);
+                    }
+                    else
+                    {
+                        z = XMVectorSqrt(XMVectorSubtract(g_XMOne, XMVector2Dot(value, value)));
+                    }
+
+                    outPixels[j] = XMVectorSelect(value, z, s_selectz);
+                }
+            }, *timage);
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [reconstructz] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+    #ifndef NDEBUG
+        auto& tinfo = timage->GetMetadata();
+    #endif
+
+        assert(info.width == tinfo.width);
+        assert(info.height == tinfo.height);
+        assert(info.depth == tinfo.depth);
+        assert(info.arraySize == tinfo.arraySize);
+        assert(info.mipLevels == tinfo.mipLevels);
+        assert(info.miscFlags == tinfo.miscFlags);
+        assert(info.format == tinfo.format);
+        assert(info.dimension == tinfo.dimension);
+
+        image.swap(timage);
+        cimage.reset();
+    }
+
+    // --- Determine whether preserve alpha coverage is required (if requested) ----
+    if (preserveAlphaCoverageRef > 0.0f && HasAlpha(info.format) && !image->IsAlphaAllOpaque())
+    {
+        preserveAlphaCoverage = true;
+    }
+
+    // --- Generate mips -----------------------------------------------------------
+    TEX_FILTER_FLAGS dwFilter3D = dwFilter;
+    if (!ispow2(info.width) || !ispow2(info.height) || !ispow2(info.depth))
+    {
+        if (!tMips || info.mipLevels != 1)
+        {
+            nonpow2warn = true;
+        }
+
+        if (info.dimension == TEX_DIMENSION_TEXTURE3D)
+        {
+            // Must force triangle filter for non-power-of-2 volume textures to get correct results
+            dwFilter3D = TEX_FILTER_TRIANGLE;
+        }
+    }
+
+    if ((!tMips || info.mipLevels != tMips || preserveAlphaCoverage) && (info.mipLevels != 1))
+    {
+        // Mips generation only works on a single base image, so strip off existing mip levels
+        // Also required for preserve alpha coverage so that existing mips are regenerated
+
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
+        {
+            RaiseError(L"\nERROR:Memory allocation failed\n");
+            return 1;
+        }
+
+        TexMetadata mdata = info;
+        mdata.mipLevels = 1;
+        hr = timage->Initialize(mdata);
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [copy to single level] (%08X%ls)\n",
+                static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+        if (info.dimension == TEX_DIMENSION_TEXTURE3D)
+        {
+            for (size_t d = 0; d < info.depth; ++d)
+            {
+                hr = CopyRectangle(*image->GetImage(0, 0, d), Rect(0, 0, info.width, info.height),
+                    *timage->GetImage(0, 0, d), TEX_FILTER_DEFAULT, 0, 0);
+                if (FAILED(hr))
+                {
+                    RaiseError(L" FAILED [copy to single level] (%08X%ls)\n",
+                        static_cast<unsigned int>(hr), GetErrorDesc(hr));
+                    return 1;
+                }
+            }
+        }
+        else
+        {
+            for (size_t i = 0; i < info.arraySize; ++i)
+            {
+                hr = CopyRectangle(*image->GetImage(0, i, 0), Rect(0, 0, info.width, info.height),
+                    *timage->GetImage(0, i, 0), TEX_FILTER_DEFAULT, 0, 0);
+                if (FAILED(hr))
+                {
+                    RaiseError(L" FAILED [copy to single level] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+                    return 1;
+                }
+            }
+        }
+
+        image.swap(timage);
+        info.mipLevels = 1;
+
+        if (cimage && (tMips == 1))
+        {
+            // Special case for trimming mips off compressed images and keeping the original compressed highest level mip
+            mdata = cimage->GetMetadata();
+            mdata.mipLevels = 1;
+            hr = timage->Initialize(mdata);
+            if (FAILED(hr))
+            {
+                RaiseError(L" FAILED [copy compressed to single level] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+                return 1;
+            }
+
+            if (mdata.dimension == TEX_DIMENSION_TEXTURE3D)
+            {
+                for (size_t d = 0; d < mdata.depth; ++d)
+                {
+                    auto simg = cimage->GetImage(0, 0, d);
+                    auto dimg = timage->GetImage(0, 0, d);
+
+                    memcpy_s(dimg->pixels, dimg->slicePitch, simg->pixels, simg->slicePitch);
+                }
+            }
+            else
+            {
+                for (size_t i = 0; i < mdata.arraySize; ++i)
+                {
+                    auto simg = cimage->GetImage(0, i, 0);
+                    auto dimg = timage->GetImage(0, i, 0);
+
+                    memcpy_s(dimg->pixels, dimg->slicePitch, simg->pixels, simg->slicePitch);
+                }
+            }
+
+            cimage.swap(timage);
+        }
+        else
+        {
+            cimage.reset();
+        }
+    }
+
+    if ((!tMips || info.mipLevels != tMips) && (info.width > 1 || info.height > 1 || info.depth > 1))
+    {
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
+        {
+            RaiseError(L"\nERROR:Memory allocation failed\n");
+            return 1;
+        }
+
+        if (info.dimension == TEX_DIMENSION_TEXTURE3D)
+        {
+            hr = GenerateMipMaps3D(image->GetImages(), image->GetImageCount(), image->GetMetadata(), dwFilter3D | dwFilterOpts, tMips, *timage);
+        }
+        else
+        {
+            hr = GenerateMipMaps(image->GetImages(), image->GetImageCount(), image->GetMetadata(), dwFilter | dwFilterOpts, tMips, *timage);
+        }
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [mipmaps] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+        auto& tinfo = timage->GetMetadata();
+        info.mipLevels = tinfo.mipLevels;
+
+        assert(info.width == tinfo.width);
+        assert(info.height == tinfo.height);
+        assert(info.depth == tinfo.depth);
+        assert(info.arraySize == tinfo.arraySize);
+        assert(info.miscFlags == tinfo.miscFlags);
+        assert(info.format == tinfo.format);
+        assert(info.dimension == tinfo.dimension);
+
+        image.swap(timage);
+        cimage.reset();
+    }
+
+    // --- Preserve mipmap alpha coverage (if requested) ---------------------------
+    if (preserveAlphaCoverage && info.mipLevels != 1 && (info.dimension != TEX_DIMENSION_TEXTURE3D))
+    {
+        std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+        if (!timage)
+        {
+            RaiseError(L"\nERROR:Memory allocation failed\n");
+            return 1;
+        }
+
+        hr = timage->Initialize(image->GetMetadata());
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED [keepcoverage] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            return 1;
+        }
+
+        const size_t items = image->GetMetadata().arraySize;
+        for (size_t item = 0; item < items; ++item)
+        {
+            auto img = image->GetImage(0, item, 0);
+            assert(img);
+
+            hr = ScaleMipMapsAlphaForCoverage(img, info.mipLevels, info, item, preserveAlphaCoverageRef, *timage);
+            if (FAILED(hr))
+            {
+                RaiseError(L" FAILED [keepcoverage] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+                return 1;
+            }
+        }
+
+    #ifndef NDEBUG
+        auto& tinfo = timage->GetMetadata();
+    #endif
+
+        assert(info.width == tinfo.width);
+        assert(info.height == tinfo.height);
+        assert(info.depth == tinfo.depth);
+        assert(info.arraySize == tinfo.arraySize);
+        assert(info.mipLevels == tinfo.mipLevels);
+        assert(info.miscFlags == tinfo.miscFlags);
+        assert(info.dimension == tinfo.dimension);
+
+        image.swap(timage);
+        cimage.reset();
+    }
+
+    // --- Premultiplied alpha (if requested) --------------------------------------
+    if ((dwOptions & (uint64_t(1) << OPT_PREMUL_ALPHA))
+        && HasAlpha(info.format)
+        && info.format != DXGI_FORMAT_A8_UNORM)
+    {
+        if (info.IsPMAlpha())
+        {
+            printf("\nWARNING: Image is already using premultiplied alpha\n");
+        }
+        else
+        {
+            auto img = image->GetImage(0, 0, 0);
+            assert(img);
+            const size_t nimg = image->GetImageCount();
+
             std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
             if (!timage)
             {
@@ -3622,23 +3578,77 @@ extern "C" __attribute__((visibility("default"))) int texconv(int argc, wchar_t*
                 return 1;
             }
 
-            hr = timage->Initialize(image->GetMetadata());
+            hr = PremultiplyAlpha(img, nimg, info, TEX_PMALPHA_DEFAULT | dwSRGB, *timage);
             if (FAILED(hr))
             {
-                RaiseError(L" FAILED [keepcoverage] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+                RaiseError(L" FAILED [premultiply alpha] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
                 return 1;
             }
 
-            const size_t items = image->GetMetadata().arraySize;
-            for (size_t item = 0; item < items; ++item)
-            {
-                auto img = image->GetImage(0, item, 0);
-                assert(img);
+            auto& tinfo = timage->GetMetadata();
+            info.miscFlags2 = tinfo.miscFlags2;
 
-                hr = ScaleMipMapsAlphaForCoverage(img, info.mipLevels, info, item, preserveAlphaCoverageRef, *timage);
+            assert(info.width == tinfo.width);
+            assert(info.height == tinfo.height);
+            assert(info.depth == tinfo.depth);
+            assert(info.arraySize == tinfo.arraySize);
+            assert(info.mipLevels == tinfo.mipLevels);
+            assert(info.miscFlags == tinfo.miscFlags);
+            assert(info.dimension == tinfo.dimension);
+
+            image.swap(timage);
+            cimage.reset();
+        }
+    }
+
+    // --- Compress ----------------------------------------------------------------
+    if (FileType == CODEC_DDS)
+    {
+        if (dxt5nm || dxt5rxgb)
+        {
+            // Prepare for DXT5nm/RXGB
+            assert(tformat == DXGI_FORMAT_BC3_UNORM);
+
+            std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
+            if (!timage)
+            {
+                RaiseError(L"\nERROR:Memory allocation failed\n");
+                return 1;
+            }
+
+            if (dxt5nm)
+            {
+                hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+                    [=](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+                    {
+                        UNREFERENCED_PARAMETER(y);
+
+                        for (size_t j = 0; j < w; ++j)
+                        {
+                            outPixels[j] = XMVectorPermute<4, 1, 5, 0>(inPixels[j], g_XMIdentityR0);
+                        }
+                    }, *timage);
                 if (FAILED(hr))
                 {
-                    RaiseError(L" FAILED [keepcoverage] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+                    RaiseError(L" FAILED [DXT5nm] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+                    return 1;
+                }
+            }
+            else
+            {
+                hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
+                    [=](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
+                    {
+                        UNREFERENCED_PARAMETER(y);
+
+                        for (size_t j = 0; j < w; ++j)
+                        {
+                            outPixels[j] = XMVectorSwizzle<3, 1, 2, 0>(inPixels[j]);
+                        }
+                    }, *timage);
+                if (FAILED(hr))
+                {
+                    RaiseError(L" FAILED [DXT5 RXGB] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
                     return 1;
                 }
             }
@@ -3653,23 +3663,40 @@ extern "C" __attribute__((visibility("default"))) int texconv(int argc, wchar_t*
             assert(info.arraySize == tinfo.arraySize);
             assert(info.mipLevels == tinfo.mipLevels);
             assert(info.miscFlags == tinfo.miscFlags);
+            assert(info.format == tinfo.format);
             assert(info.dimension == tinfo.dimension);
 
             image.swap(timage);
             cimage.reset();
         }
 
-        // --- Premultiplied alpha (if requested) --------------------------------------
-        if ((dwOptions & (uint64_t(1) << OPT_PREMUL_ALPHA))
-            && HasAlpha(info.format)
-            && info.format != DXGI_FORMAT_A8_UNORM)
+        if (IsCompressed(tformat))
         {
-            if (info.IsPMAlpha())
+            if (cimage && (cimage->GetMetadata().format == tformat))
             {
-                printf("\nWARNING: Image is already using premultiplied alpha\n");
+                // We never changed the image and it was already compressed in our desired format, use original data
+                image.reset(cimage.release());
+
+                auto& tinfo = image->GetMetadata();
+
+                if ((tinfo.width % 4) != 0 || (tinfo.height % 4) != 0)
+                {
+                    non4bc = true;
+                }
+
+                info.format = tinfo.format;
+                assert(info.width == tinfo.width);
+                assert(info.height == tinfo.height);
+                assert(info.depth == tinfo.depth);
+                assert(info.arraySize == tinfo.arraySize);
+                assert(info.mipLevels == tinfo.mipLevels);
+                assert(info.miscFlags == tinfo.miscFlags);
+                assert(info.dimension == tinfo.dimension);
             }
             else
             {
+                cimage.reset();
+
                 auto img = image->GetImage(0, 0, 0);
                 assert(img);
                 const size_t nimg = image->GetImageCount();
@@ -3681,509 +3708,369 @@ extern "C" __attribute__((visibility("default"))) int texconv(int argc, wchar_t*
                     return 1;
                 }
 
-                hr = PremultiplyAlpha(img, nimg, info, TEX_PMALPHA_DEFAULT | dwSRGB, *timage);
-                if (FAILED(hr))
+                bool bc6hbc7 = false;
+                switch (tformat)
                 {
-                    RaiseError(L" FAILED [premultiply alpha] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                    retVal = 1;
-                    continue;
+                case DXGI_FORMAT_BC6H_TYPELESS:
+                case DXGI_FORMAT_BC6H_UF16:
+                case DXGI_FORMAT_BC6H_SF16:
+                case DXGI_FORMAT_BC7_TYPELESS:
+                case DXGI_FORMAT_BC7_UNORM:
+                case DXGI_FORMAT_BC7_UNORM_SRGB:
+                    bc6hbc7 = true;
+
+                    {
+                        static bool s_tryonce = false;
+
+                        if (!s_tryonce)
+                        {
+                            s_tryonce = true;
+
+                        #if !NO_GPU_CODEC
+                            if (!(dwOptions & (uint64_t(1) << OPT_NOGPU)))
+                            {
+                                if (!CreateDevice(adapter, pDevice.GetAddressOf()))
+                                    wprintf(L"\nWARNING: DirectCompute is not available, using BC6H / BC7 CPU codec\n");
+                            }
+                            else
+                        #endif
+                            {
+                                wprintf(L"\nWARNING: using BC6H / BC7 CPU codec\n");
+                            }
+                        }
+                    }
+                    break;
+
+                default:
+                    break;
                 }
 
-                auto& tinfo = timage->GetMetadata();
-                info.miscFlags2 = tinfo.miscFlags2;
-
-                assert(info.width == tinfo.width);
-                assert(info.height == tinfo.height);
-                assert(info.depth == tinfo.depth);
-                assert(info.arraySize == tinfo.arraySize);
-                assert(info.mipLevels == tinfo.mipLevels);
-                assert(info.miscFlags == tinfo.miscFlags);
-                assert(info.dimension == tinfo.dimension);
-
-                image.swap(timage);
-                cimage.reset();
-            }
-        }
-
-        // --- Compress ----------------------------------------------------------------
-        if (FileType == CODEC_DDS)
-        {
-            if (dxt5nm || dxt5rxgb)
-            {
-                // Prepare for DXT5nm/RXGB
-                assert(tformat == DXGI_FORMAT_BC3_UNORM);
-
-                std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-                if (!timage)
+                TEX_COMPRESS_FLAGS cflags = dwCompress;
+            #ifdef _OPENMP
+                if (!(dwOptions & (uint64_t(1) << OPT_FORCE_SINGLEPROC)))
                 {
-                    RaiseError(L"\nERROR:Memory allocation failed\n");
+                    cflags |= TEX_COMPRESS_PARALLEL;
+                }
+            #endif
+
+                if ((img->width % 4) != 0 || (img->height % 4) != 0)
+                {
+                    non4bc = true;
+                }
+
+            #if !NO_GPU_CODEC
+                if (bc6hbc7 && pDevice)
+                {
+                    hr = Compress(pDevice.Get(), img, nimg, info, tformat, dwCompress | dwSRGB, alphaWeight, *timage);
+                }
+                else
+            #endif
+                {
+                    if (bc6hbc7) {
+                        if (allow_slow_codec) {
+                            wprintf(L"\nWARNING: Using CPU codec for BC6 or BC7. It'll take a long time for conversion.\n");
+                        } else {
+                            wprintf(L"\n");
+                            RaiseError(L"Error: Can NOT use CPU codec for BC6 and BC7. Or enable the allow_slow_codec option.\n");
+                            return 1;
+                        }
+                    }
+                    hr = Compress(img, nimg, info, tformat, cflags | dwSRGB, alphaThreshold, *timage);
+                }
+                if (FAILED(hr))
+                {
+                    RaiseError(L" FAILED [compress] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
                     return 1;
                 }
 
-                if (dxt5nm)
-                {
-                    hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                        [=](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                        {
-                            UNREFERENCED_PARAMETER(y);
-
-                            for (size_t j = 0; j < w; ++j)
-                            {
-                                outPixels[j] = XMVectorPermute<4, 1, 5, 0>(inPixels[j], g_XMIdentityR0);
-                            }
-                        }, *timage);
-                    if (FAILED(hr))
-                    {
-                        RaiseError(L" FAILED [DXT5nm] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                        return 1;
-                    }
-                }
-                else
-                {
-                    hr = TransformImage(image->GetImages(), image->GetImageCount(), image->GetMetadata(),
-                        [=](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t w, size_t y)
-                        {
-                            UNREFERENCED_PARAMETER(y);
-
-                            for (size_t j = 0; j < w; ++j)
-                            {
-                                outPixels[j] = XMVectorSwizzle<3, 1, 2, 0>(inPixels[j]);
-                            }
-                        }, *timage);
-                    if (FAILED(hr))
-                    {
-                        RaiseError(L" FAILED [DXT5 RXGB] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                        return 1;
-                    }
-                }
-
-            #ifndef NDEBUG
                 auto& tinfo = timage->GetMetadata();
-            #endif
 
+                info.format = tinfo.format;
                 assert(info.width == tinfo.width);
                 assert(info.height == tinfo.height);
                 assert(info.depth == tinfo.depth);
                 assert(info.arraySize == tinfo.arraySize);
                 assert(info.mipLevels == tinfo.mipLevels);
                 assert(info.miscFlags == tinfo.miscFlags);
-                assert(info.format == tinfo.format);
                 assert(info.dimension == tinfo.dimension);
 
                 image.swap(timage);
-                cimage.reset();
-            }
-
-            if (IsCompressed(tformat))
-            {
-                if (cimage && (cimage->GetMetadata().format == tformat))
-                {
-                    // We never changed the image and it was already compressed in our desired format, use original data
-                    image.reset(cimage.release());
-
-                    auto& tinfo = image->GetMetadata();
-
-                    if ((tinfo.width % 4) != 0 || (tinfo.height % 4) != 0)
-                    {
-                        non4bc = true;
-                    }
-
-                    info.format = tinfo.format;
-                    assert(info.width == tinfo.width);
-                    assert(info.height == tinfo.height);
-                    assert(info.depth == tinfo.depth);
-                    assert(info.arraySize == tinfo.arraySize);
-                    assert(info.mipLevels == tinfo.mipLevels);
-                    assert(info.miscFlags == tinfo.miscFlags);
-                    assert(info.dimension == tinfo.dimension);
-                }
-                else
-                {
-                    cimage.reset();
-
-                    auto img = image->GetImage(0, 0, 0);
-                    assert(img);
-                    const size_t nimg = image->GetImageCount();
-
-                    std::unique_ptr<ScratchImage> timage(new (std::nothrow) ScratchImage);
-                    if (!timage)
-                    {
-                        RaiseError(L"\nERROR:Memory allocation failed\n");
-                        return 1;
-                    }
-
-                    bool bc6hbc7 = false;
-                    switch (tformat)
-                    {
-                    case DXGI_FORMAT_BC6H_TYPELESS:
-                    case DXGI_FORMAT_BC6H_UF16:
-                    case DXGI_FORMAT_BC6H_SF16:
-                    case DXGI_FORMAT_BC7_TYPELESS:
-                    case DXGI_FORMAT_BC7_UNORM:
-                    case DXGI_FORMAT_BC7_UNORM_SRGB:
-                        bc6hbc7 = true;
-
-                        {
-                            static bool s_tryonce = false;
-
-                            if (!s_tryonce)
-                            {
-                                s_tryonce = true;
-
-                            #if !NO_GPU_CODEC
-                                if (!(dwOptions & (uint64_t(1) << OPT_NOGPU)))
-                                {
-                                    if (!CreateDevice(adapter, pDevice.GetAddressOf()))
-                                        wprintf(L"\nWARNING: DirectCompute is not available, using BC6H / BC7 CPU codec\n");
-                                }
-                                else
-                            #endif
-                                {
-                                    wprintf(L"\nWARNING: using BC6H / BC7 CPU codec\n");
-                                }
-                            }
-                        }
-                        break;
-
-                    default:
-                        break;
-                    }
-
-                    TEX_COMPRESS_FLAGS cflags = dwCompress;
-                #ifdef _OPENMP
-                    if (!(dwOptions & (uint64_t(1) << OPT_FORCE_SINGLEPROC)))
-                    {
-                        cflags |= TEX_COMPRESS_PARALLEL;
-                    }
-                #endif
-
-                    if ((img->width % 4) != 0 || (img->height % 4) != 0)
-                    {
-                        non4bc = true;
-                    }
-
-                #if !NO_GPU_CODEC
-                    if (bc6hbc7 && pDevice)
-                    {
-                        hr = Compress(pDevice.Get(), img, nimg, info, tformat, dwCompress | dwSRGB, alphaWeight, *timage);
-                    }
-                    else
-                #endif
-                    {
-                        if (bc6hbc7) {
-                            if (allow_slow_codec) {
-                                wprintf(L"\nWARNING: Using CPU codec for BC6 or BC7. It'll take a long time for conversion.\n");
-                            } else {
-                                wprintf(L"\n");
-                                RaiseError(L"Error: Can NOT use CPU codec for BC6 and BC7. Or enable the allow_slow_codec option.\n");
-                                retVal = 1;
-                                continue;
-                            }
-                        }
-                        hr = Compress(img, nimg, info, tformat, cflags | dwSRGB, alphaThreshold, *timage);
-                    }
-                    if (FAILED(hr))
-                    {
-                        RaiseError(L" FAILED [compress] (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
-                        retVal = 1;
-                        continue;
-                    }
-
-                    auto& tinfo = timage->GetMetadata();
-
-                    info.format = tinfo.format;
-                    assert(info.width == tinfo.width);
-                    assert(info.height == tinfo.height);
-                    assert(info.depth == tinfo.depth);
-                    assert(info.arraySize == tinfo.arraySize);
-                    assert(info.mipLevels == tinfo.mipLevels);
-                    assert(info.miscFlags == tinfo.miscFlags);
-                    assert(info.dimension == tinfo.dimension);
-
-                    image.swap(timage);
-                }
             }
         }
+    }
 
-        cimage.reset();
+    cimage.reset();
 
-        // --- Set alpha mode ----------------------------------------------------------
-        if (HasAlpha(info.format)
-            && info.format != DXGI_FORMAT_A8_UNORM)
+    // --- Set alpha mode ----------------------------------------------------------
+    if (HasAlpha(info.format)
+        && info.format != DXGI_FORMAT_A8_UNORM)
+    {
+        if (dxt5nm || dxt5rxgb)
         {
-            if (dxt5nm || dxt5rxgb)
-            {
-                info.SetAlphaMode(TEX_ALPHA_MODE_CUSTOM);
-            }
-            else if (image->IsAlphaAllOpaque())
-            {
-                info.SetAlphaMode(TEX_ALPHA_MODE_OPAQUE);
-            }
-            else if (info.IsPMAlpha())
-            {
-                // Aleady set TEX_ALPHA_MODE_PREMULTIPLIED
-            }
-            else if (dwOptions & (uint64_t(1) << OPT_SEPALPHA))
-            {
-                info.SetAlphaMode(TEX_ALPHA_MODE_CUSTOM);
-            }
-            else if (info.GetAlphaMode() == TEX_ALPHA_MODE_UNKNOWN)
-            {
-                info.SetAlphaMode(TEX_ALPHA_MODE_STRAIGHT);
-            }
+            info.SetAlphaMode(TEX_ALPHA_MODE_CUSTOM);
+        }
+        else if (image->IsAlphaAllOpaque())
+        {
+            info.SetAlphaMode(TEX_ALPHA_MODE_OPAQUE);
+        }
+        else if (info.IsPMAlpha())
+        {
+            // Aleady set TEX_ALPHA_MODE_PREMULTIPLIED
+        }
+        else if (dwOptions & (uint64_t(1) << OPT_SEPALPHA))
+        {
+            info.SetAlphaMode(TEX_ALPHA_MODE_CUSTOM);
+        }
+        else if (info.GetAlphaMode() == TEX_ALPHA_MODE_UNKNOWN)
+        {
+            info.SetAlphaMode(TEX_ALPHA_MODE_STRAIGHT);
+        }
+    }
+    else
+    {
+        info.SetAlphaMode(TEX_ALPHA_MODE_UNKNOWN);
+    }
+
+    // --- Save result -------------------------------------------------------------
+    {
+        auto img = image->GetImage(0, 0, 0);
+        assert(img);
+        const size_t nimg = image->GetImageCount();
+
+    #ifdef USE_XBOX_EXTS
+        const bool isXboxOut = ((FileType == CODEC_DDS) && (dwOptions & (uint64_t(1) << OPT_USE_XBOX))) != 0;
+    #else
+        constexpr bool isXboxOut = false;
+    #endif
+        PrintInfoVerbose(info, isXboxOut);
+        PrintVerbose(L"\n");
+
+        // Figure out dest filename
+        std::filesystem::path dest(outputDir);
+
+
+
+        std::error_code ec;
+        auto apath = std::filesystem::absolute(dest, ec);
+
+        if (ec)
+        {
+            RaiseError(L" get full path FAILED (%hs)\n", ec.message().c_str());
+            return 1;
+        }
+
+    #ifdef _WIN32
+        auto const err = static_cast<DWORD>(SHCreateDirectoryExW(nullptr, apath.c_str(), nullptr));
+        if (err != ERROR_SUCCESS && err != ERROR_ALREADY_EXISTS)
+        {
+            RaiseError(L" directory creation FAILED (%08X%ls)\n",
+                static_cast<unsigned int>(HRESULT_FROM_WIN32(err)), GetErrorDesc(HRESULT_FROM_WIN32(err)));
+            return 1;
+        }
+    #else
+        std::filesystem::create_directory(apath, ec);
+        if (ec)
+        {
+            RaiseError(L" directory creation FAILED (%hs)\n", ec.message().c_str());
+            retVal = 1;
+            continue;
+        }
+    #endif
+
+
+        if (*szPrefix)
+        {
+            dest.append(szPrefix);
+            dest.concat(fname);
+            dest.concat(szSuffix);
         }
         else
         {
-            info.SetAlphaMode(TEX_ALPHA_MODE_UNKNOWN);
+            dest.append(fname);
+            dest.concat(szSuffix);
         }
 
-        // --- Save result -------------------------------------------------------------
+        std::wstring destName = dest.wstring().c_str();
+        if (dwOptions & (uint64_t(1) << OPT_TOLOWER))
         {
-            auto img = image->GetImage(0, 0, 0);
-            assert(img);
-            const size_t nimg = image->GetImageCount();
+            std::transform(destName.begin(), destName.end(), destName.begin(), towlower);
+        }
 
-        #ifdef USE_XBOX_EXTS
-            const bool isXboxOut = ((FileType == CODEC_DDS) && (dwOptions & (uint64_t(1) << OPT_USE_XBOX))) != 0;
+        // Write texture
+        PrintVerbose(L"writing %ls", destName.c_str());
+        fflush(stdout);
+
+        if (~dwOptions & (uint64_t(1) << OPT_OVERWRITE))
+        {
+        #ifdef _WIN32
+            if (GetFileAttributesW(destName.c_str()) != INVALID_FILE_ATTRIBUTES)
         #else
-            constexpr bool isXboxOut = false;
+            if (std::filesystem::exists(destName.c_str()))
         #endif
-            PrintInfoVerbose(info, isXboxOut);
-            PrintVerbose(L"\n");
-
-            // Figure out dest filename
-            std::filesystem::path dest(outputDir);
-
-            if (keepRecursiveDirs && !pConv->szFolder.empty())
             {
-                dest.append(pConv->szFolder.c_str());
-
-                std::error_code ec;
-                auto apath = std::filesystem::absolute(dest, ec);
-
-                if (ec)
-                {
-                    RaiseError(L" get full path FAILED (%hs)\n", ec.message().c_str());
-                    retVal = 1;
-                    continue;
-                }
-
-            #ifdef _WIN32
-                auto const err = static_cast<DWORD>(SHCreateDirectoryExW(nullptr, apath.c_str(), nullptr));
-                if (err != ERROR_SUCCESS && err != ERROR_ALREADY_EXISTS)
-                {
-                    RaiseError(L" directory creation FAILED (%08X%ls)\n",
-                        static_cast<unsigned int>(HRESULT_FROM_WIN32(err)), GetErrorDesc(HRESULT_FROM_WIN32(err)));
-                    retVal = 1;
-                    continue;
-                }
-            #else
-                std::filesystem::create_directory(apath, ec);
-                if (ec)
-                {
-                    RaiseError(L" directory creation FAILED (%hs)\n", ec.message().c_str());
-                    retVal = 1;
-                    continue;
-                }
-            #endif
+                RaiseError(L"\nERROR:Output file already exists, use -y to overwrite:\n");
+                return 1;
             }
+        }
 
-            if (*szPrefix)
+        switch (FileType)
+        {
+        case CODEC_DDS:
+        #ifdef USE_XBOX_EXTS
+            if (isXboxOut)
             {
-                dest.append(szPrefix);
-                dest.concat(curpath.stem().c_str());
-                dest.concat(szSuffix);
+                Xbox::XboxImage xbox;
+
+                hr = Xbox::Tile(img, nimg, info, xbox);
+                if (SUCCEEDED(hr))
+                {
+                    hr = Xbox::SaveToDDSFile(xbox, destName.c_str());
+                }
             }
             else
+        #endif // USE_XBOX_EXTS
             {
-                dest.append(curpath.stem().c_str());
-                dest.concat(szSuffix);
-            }
-
-            std::wstring destName = dest.wstring().c_str();
-            if (dwOptions & (uint64_t(1) << OPT_TOLOWER))
-            {
-                std::transform(destName.begin(), destName.end(), destName.begin(), towlower);
-            }
-
-            // Write texture
-            PrintVerbose(L"writing %ls", destName.c_str());
-            fflush(stdout);
-
-            if (~dwOptions & (uint64_t(1) << OPT_OVERWRITE))
-            {
-            #ifdef _WIN32
-                if (GetFileAttributesW(destName.c_str()) != INVALID_FILE_ATTRIBUTES)
-            #else
-                if (std::filesystem::exists(destName.c_str()))
-            #endif
+                DDS_FLAGS ddsFlags = DDS_FLAGS_NONE;
+                if (dwOptions & (uint64_t(1) << OPT_USE_DX10))
                 {
-                    RaiseError(L"\nERROR:Output file already exists, use -y to overwrite:\n");
-                    retVal = 1;
-                    continue;
+                    ddsFlags |= DDS_FLAGS_FORCE_DX10_EXT | DDS_FLAGS_FORCE_DX10_EXT_MISC2;
                 }
-            }
-
-            switch (FileType)
-            {
-            case CODEC_DDS:
-            #ifdef USE_XBOX_EXTS
-                if (isXboxOut)
+                else if (dwOptions & (uint64_t(1) << OPT_USE_DX9))
                 {
-                    Xbox::XboxImage xbox;
-
-                    hr = Xbox::Tile(img, nimg, info, xbox);
-                    if (SUCCEEDED(hr))
+                    if (dxt5rxgb)
                     {
-                        hr = Xbox::SaveToDDSFile(xbox, destName.c_str());
-                    }
-                }
-                else
-            #endif // USE_XBOX_EXTS
-                {
-                    DDS_FLAGS ddsFlags = DDS_FLAGS_NONE;
-                    if (dwOptions & (uint64_t(1) << OPT_USE_DX10))
-                    {
-                        ddsFlags |= DDS_FLAGS_FORCE_DX10_EXT | DDS_FLAGS_FORCE_DX10_EXT_MISC2;
-                    }
-                    else if (dwOptions & (uint64_t(1) << OPT_USE_DX9))
-                    {
-                        if (dxt5rxgb)
-                        {
-                            ddsFlags |= DDS_FLAGS_FORCE_DXT5_RXGB;
-                        }
-
-                        ddsFlags |= DDS_FLAGS_FORCE_DX9_LEGACY;
+                        ddsFlags |= DDS_FLAGS_FORCE_DXT5_RXGB;
                     }
 
-                    hr = SaveToDDSFile(img, nimg, info, ddsFlags, destName.c_str());
+                    ddsFlags |= DDS_FLAGS_FORCE_DX9_LEGACY;
                 }
-                break;
 
-            case CODEC_TGA:
-                hr = SaveToTGAFile(img[0], TGA_FLAGS_NONE, destName.c_str(), (dwOptions & (uint64_t(1) << OPT_TGA20)) ? &info : nullptr);
-                break;
+                hr = SaveToDDSFile(img, nimg, info, ddsFlags, destName.c_str());
+            }
+            break;
 
-            case CODEC_HDR:
-                hr = SaveToHDRFile(img[0], destName.c_str());
-                break;
+        case CODEC_TGA:
+            hr = SaveToTGAFile(img[0], TGA_FLAGS_NONE, destName.c_str(), (dwOptions & (uint64_t(1) << OPT_TGA20)) ? &info : nullptr);
+            break;
 
+        case CODEC_HDR:
+            hr = SaveToHDRFile(img[0], destName.c_str());
+            break;
+
+        #if USE_WIC
+        case CODEC_PPM:
+            hr = SaveToPortablePixMap(img[0], destName.c_str());
+            break;
+
+        case CODEC_PFM:
+            hr = SaveToPortablePixMapHDR(img[0], destName.c_str());
+            break;
+        #endif
+
+        #ifdef USE_OPENEXR
+        case CODEC_EXR:
+            hr = SaveToEXRFile(img[0], destName.c_str());
+            break;
+        #endif
+        #ifdef USE_LIBJPEG
+        case CODEC_JPEG:
+            hr = SaveToJPEGFile(img[0], destName.c_str());
+            break;
+        #endif
+        #ifdef USE_LIBPNG
+        case CODEC_PNG:
+            hr = SaveToPNGFile(img[0], destName.c_str());
+            break;
+        #endif
+
+        default:
+            {
             #if USE_WIC
-            case CODEC_PPM:
-                hr = SaveToPortablePixMap(img[0], destName.c_str());
-                break;
+                const WICCodecs codec = (FileType == CODEC_HDP || FileType == CODEC_JXR) ? WIC_CODEC_WMP : static_cast<WICCodecs>(FileType);
+                const size_t nimages = (dwOptions & (uint64_t(1) << OPT_WIC_MULTIFRAME)) ? nimg : 1;
+                hr = SaveToWICFile(img, nimages, WIC_FLAGS_NONE, GetWICCodec(codec), destName.c_str(), nullptr,
+                    [&](IPropertyBag2* props)
+                    {
+                        const bool wicLossless = (dwOptions & (uint64_t(1) << OPT_WIC_LOSSLESS)) != 0;
 
-            case CODEC_PFM:
-                hr = SaveToPortablePixMapHDR(img[0], destName.c_str());
-                break;
-            #endif
-
-            #ifdef USE_OPENEXR
-            case CODEC_EXR:
-                hr = SaveToEXRFile(img[0], destName.c_str());
-                break;
-            #endif
-            #ifdef USE_LIBJPEG
-            case CODEC_JPEG:
-                hr = SaveToJPEGFile(img[0], destName.c_str());
-                break;
-            #endif
-            #ifdef USE_LIBPNG
-            case CODEC_PNG:
-                hr = SaveToPNGFile(img[0], destName.c_str());
-                break;
-            #endif
-
-            default:
-                {
-                #if USE_WIC
-                    const WICCodecs codec = (FileType == CODEC_HDP || FileType == CODEC_JXR) ? WIC_CODEC_WMP : static_cast<WICCodecs>(FileType);
-                    const size_t nimages = (dwOptions & (uint64_t(1) << OPT_WIC_MULTIFRAME)) ? nimg : 1;
-                    hr = SaveToWICFile(img, nimages, WIC_FLAGS_NONE, GetWICCodec(codec), destName.c_str(), nullptr,
-                        [&](IPropertyBag2* props)
+                        switch (FileType)
                         {
-                            const bool wicLossless = (dwOptions & (uint64_t(1) << OPT_WIC_LOSSLESS)) != 0;
-
-                            switch (FileType)
+                        case WIC_CODEC_JPEG:
+                            if (wicLossless || wicQuality >= 0.f)
                             {
-                            case WIC_CODEC_JPEG:
-                                if (wicLossless || wicQuality >= 0.f)
+                                PROPBAG2 options = {};
+                                VARIANT varValues = {};
+                                options.pstrName = const_cast<wchar_t*>(L"ImageQuality");
+                                varValues.vt = VT_R4;
+                                varValues.fltVal = (wicLossless) ? 1.f : wicQuality;
+                                std::ignore = props->Write(1, &options, &varValues);
+                            }
+                            break;
+
+                        case WIC_CODEC_TIFF:
+                            {
+                                PROPBAG2 options = {};
+                                VARIANT varValues = {};
+                                if (wicLossless)
                                 {
-                                    PROPBAG2 options = {};
-                                    VARIANT varValues = {};
+                                    options.pstrName = const_cast<wchar_t*>(L"TiffCompressionMethod");
+                                    varValues.vt = VT_UI1;
+                                    varValues.bVal = WICTiffCompressionNone;
+                                }
+                                else if (wicQuality >= 0.f)
+                                {
+                                    options.pstrName = const_cast<wchar_t*>(L"CompressionQuality");
+                                    varValues.vt = VT_R4;
+                                    varValues.fltVal = wicQuality;
+                                }
+                                std::ignore = props->Write(1, &options, &varValues);
+                            }
+                            break;
+
+                        case WIC_CODEC_WMP:
+                        case CODEC_HDP:
+                        case CODEC_JXR:
+                            {
+                                PROPBAG2 options = {};
+                                VARIANT varValues = {};
+                                if (wicLossless)
+                                {
+                                    options.pstrName = const_cast<wchar_t*>(L"Lossless");
+                                    varValues.vt = VT_BOOL;
+                                    varValues.bVal = TRUE;
+                                }
+                                else if (wicQuality >= 0.f)
+                                {
                                     options.pstrName = const_cast<wchar_t*>(L"ImageQuality");
                                     varValues.vt = VT_R4;
-                                    varValues.fltVal = (wicLossless) ? 1.f : wicQuality;
-                                    std::ignore = props->Write(1, &options, &varValues);
+                                    varValues.fltVal = wicQuality;
                                 }
-                                break;
-
-                            case WIC_CODEC_TIFF:
-                                {
-                                    PROPBAG2 options = {};
-                                    VARIANT varValues = {};
-                                    if (wicLossless)
-                                    {
-                                        options.pstrName = const_cast<wchar_t*>(L"TiffCompressionMethod");
-                                        varValues.vt = VT_UI1;
-                                        varValues.bVal = WICTiffCompressionNone;
-                                    }
-                                    else if (wicQuality >= 0.f)
-                                    {
-                                        options.pstrName = const_cast<wchar_t*>(L"CompressionQuality");
-                                        varValues.vt = VT_R4;
-                                        varValues.fltVal = wicQuality;
-                                    }
-                                    std::ignore = props->Write(1, &options, &varValues);
-                                }
-                                break;
-
-                            case WIC_CODEC_WMP:
-                            case CODEC_HDP:
-                            case CODEC_JXR:
-                                {
-                                    PROPBAG2 options = {};
-                                    VARIANT varValues = {};
-                                    if (wicLossless)
-                                    {
-                                        options.pstrName = const_cast<wchar_t*>(L"Lossless");
-                                        varValues.vt = VT_BOOL;
-                                        varValues.bVal = TRUE;
-                                    }
-                                    else if (wicQuality >= 0.f)
-                                    {
-                                        options.pstrName = const_cast<wchar_t*>(L"ImageQuality");
-                                        varValues.vt = VT_R4;
-                                        varValues.fltVal = wicQuality;
-                                    }
-                                    std::ignore = props->Write(1, &options, &varValues);
-                                }
-                                break;
+                                std::ignore = props->Write(1, &options, &varValues);
                             }
-                        });
-                #else
-                    RaiseError(L"ERROR: This format requires WIC\n");
-                    retVal = 1;
-                    continue;
-                #endif
-                }
-                break;
-            }
-
-            if (FAILED(hr))
-            {
-                RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+                            break;
+                        }
+                    });
+            #else
+                RaiseError(L"ERROR: This format requires WIC\n");
                 retVal = 1;
-            #if USE_WIC
-                if ((hr == static_cast<HRESULT>(0xc00d5212) /* MF_E_TOPO_CODEC_NOT_FOUND */) && (FileType == WIC_CODEC_HEIF))
-                {
-                    wprintf(L"INFO: This format requires installing the HEIF Image Extensions - https://aka.ms/heif\n");
-                }
-            #endif
                 continue;
+            #endif
             }
-            PrintVerbose(L"\n");
+            break;
         }
+
+        if (FAILED(hr))
+        {
+            RaiseError(L" FAILED (%08X%ls)\n", static_cast<unsigned int>(hr), GetErrorDesc(hr));
+            retVal = 1;
+        #if USE_WIC
+            if ((hr == static_cast<HRESULT>(0xc00d5212) /* MF_E_TOPO_CODEC_NOT_FOUND */) && (FileType == WIC_CODEC_HEIF))
+            {
+                wprintf(L"INFO: This format requires installing the HEIF Image Extensions - https://aka.ms/heif\n");
+            }
+        #endif
+        }
+        PrintVerbose(L"\n");
     }
 
     if (sizewarn)
